@@ -5,3 +5,4 @@ ollama
 lmstudio
 chromadb
 sentence-transformers
+websocket-client
