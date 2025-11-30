@@ -267,14 +267,12 @@ class DocumentWidget(QWidget):
         self.layout.addWidget(self.stack)
 
     def on_modification_changed(self, changed):
-        # print(f"DEBUG: DocumentWidget on_modification_changed {changed}")
         self.modification_changed.emit(changed)
 
     def is_modified(self):
         return self.editor.document().isModified()
 
     def set_modified(self, modified):
-        # print(f"DEBUG: DocumentWidget set_modified {modified}")
         self.editor.document().setModified(modified)
 
     def handle_link(self, url):
@@ -411,7 +409,6 @@ class EditorWidget(QWidget):
         self.open_files[path] = widget
 
     def on_doc_modified(self, widget, modified):
-        # print(f"DEBUG: on_doc_modified {modified}")
         index = self.tabs.indexOf(widget)
         if index != -1:
             title = os.path.basename(widget.property("file_path"))
@@ -437,7 +434,6 @@ class EditorWidget(QWidget):
         return False
 
     def mark_current_saved(self):
-        # print("DEBUG: mark_current_saved called")
         widget = self.tabs.currentWidget()
         if isinstance(widget, DocumentWidget):
             widget.set_modified(False)

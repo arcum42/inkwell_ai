@@ -5,7 +5,7 @@ The outline for my story will go here.
 * Lettuce
 * Cheese
 * Tacos
+* Soda 
 
-Yo quero Taco Bell.
-
+ 
 ![Cyberpunk Cat Picture](test_project/assets/cat.png "Cyber Cat")

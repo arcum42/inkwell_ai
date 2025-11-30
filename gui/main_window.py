@@ -7,7 +7,7 @@ from core.llm_provider import OllamaProvider, LMStudioProvider
 from PySide6.QtCore import QSettings
 
 from gui.dialogs.settings_dialog import SettingsDialog
-from gui.editor import EditorWidget
+from gui.editor import EditorWidget, DocumentWidget, ImageViewerWidget
 from gui.chat import ChatWidget
 from gui.welcome import WelcomeWidget
 from gui.image_gen import ImageGenWidget
@@ -17,6 +17,7 @@ from core.rag_engine import RAGEngine
 from gui.dialogs.diff_dialog import DiffDialog
 import re
 import os
+import hashlib
 
 # ... (ChatWorker class remains unchanged) ...
 
@@ -283,7 +284,7 @@ class MainWindow(QMainWindow):
         
         # Image Studio
         self.image_gen = ImageGenWidget(self.settings)
-        self.editor.add_tab(self.image_gen, "Image Studio")
+        # self.editor.add_tab(self.image_gen, "Image Studio") # Don't open by default, let persistence handle it
         
         # Chat Interface
         self.chat = ChatWidget()
@@ -469,10 +470,14 @@ class MainWindow(QMainWindow):
         path, content = self.editor.get_current_file()
         if path and content is not None:
             try:
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                self.statusBar().showMessage(f"Saved {path}", 2000)
-                self.editor.mark_current_saved() # Reset modified state
+                if self.project_manager.save_file(path, content):
+                    self.statusBar().showMessage(f"Saved {path}", 2000)
+                    self.editor.mark_current_saved() # Reset modified state
+                    # Update RAG index for this file
+                    if self.rag_engine:
+                        self.rag_engine.index_file(path, content)
+                else:
+                    QMessageBox.warning(self, "Error", f"Failed to save {path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save file: {e}")
         else:
@@ -514,10 +519,87 @@ class MainWindow(QMainWindow):
             self.index_thread = QThread()
             self.index_thread.run = self.rag_engine.index_project
             self.index_thread.start()
+            
+            # Restore Tabs
+            self.restore_project_state(folder_path)
+
+    def save_project_state(self):
+        if not self.project_manager.root_path:
+            return
+            
+        project_path = self.project_manager.root_path
+        
+        # Use hash of path for key to avoid issues with special chars
+        key = hashlib.md5(project_path.encode()).hexdigest()
+        
+        # Get open files
+        open_files = []
+        for i in range(self.editor.tabs.count()):
+            widget = self.editor.tabs.widget(i)
+            if isinstance(widget, DocumentWidget) or isinstance(widget, ImageViewerWidget):
+                path = widget.property("file_path")
+                if path and os.path.exists(path) and not os.path.isdir(path):
+                    open_files.append(path)
+        
+        # Check Image Studio
+        # We need to check if any of the tabs is the image_gen widget
+        image_studio_open = False
+        for i in range(self.editor.tabs.count()):
+            if self.editor.tabs.widget(i) == self.image_gen:
+                image_studio_open = True
+                break
+        
+        self.settings.setValue(f"state/{key}/open_files", open_files)
+        self.settings.setValue(f"state/{key}/image_studio_open", image_studio_open)
+        self.settings.sync() # Force write to disk
+
+    def restore_project_state(self, project_path):
+        key = hashlib.md5(project_path.encode()).hexdigest()
+        
+        # Restore files
+        open_files = self.settings.value(f"state/{key}/open_files", [])
+        
+        # Ensure it's a list (QSettings might return a string if only one item)
+        if open_files and not isinstance(open_files, list):
+            open_files = [open_files]
+            
+        if open_files:
+            for path in open_files:
+                if os.path.exists(path) and not os.path.isdir(path):
+                    # Check extension to decide how to open
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
+                        self.editor.open_file(path, None)
+                    else:
+                        content = self.project_manager.read_file(path)
+                        if content is not None:
+                            self.editor.open_file(path, content)
+        
+        # Restore Image Studio
+        image_studio_open = self.settings.value(f"state/{key}/image_studio_open", False, type=bool)
+        if image_studio_open:
+            self.open_image_studio()
+
+    def closeEvent(self, event):
+        # Save state and cleanup, but keep last_project setting so it auto-opens
+        if self.project_manager.root_path:
+            self._shutdown_project_session(clear_last_project=False)
+        super().closeEvent(event)
 
     def close_project(self):
+        # Save state, cleanup, and clear last_project setting
+        self._shutdown_project_session(clear_last_project=True)
+        
+        # Switch to Welcome
+        self.stack.setCurrentWidget(self.welcome_widget)
+
+    def _shutdown_project_session(self, clear_last_project=False):
+        """Common logic for closing a project session."""
+        # Save state before closing
+        self.save_project_state()
+        
         # Clear state
-        self.project_manager.current_project_path = None
+        self.project_manager.root_path = None
         self.sidebar.model.setRootPath("")
         self.setWindowTitle("Inkwell AI")
         
@@ -532,14 +614,12 @@ class MainWindow(QMainWindow):
         # Stop RAG
         self.rag_engine = None
         
-        # Clear last project setting so it doesn't auto-open next time if user explicitly closed it
-        self.settings.setValue("last_project", "")
+        # Clear last project setting if requested (e.g. user explicitly closed project)
+        if clear_last_project:
+            self.settings.setValue("last_project", "")
         
         # Update Welcome Screen
         self.update_welcome_screen()
-        
-        # Switch to Welcome
-        self.stack.setCurrentWidget(self.welcome_widget)
 
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
@@ -568,16 +648,5 @@ class MainWindow(QMainWindow):
                     content = self.project_manager.read_file(file_path)
                     if content is not None:
                         self.editor.open_file(file_path, content)
-
-    def save_current_file(self):
-        path, content = self.editor.get_current_file()
-        if path and content is not None:
-            if self.project_manager.save_file(path, content):
-                self.statusBar().showMessage(f"Saved {path}", 3000)
-                # Update RAG index for this file
-                if self.rag_engine:
-                    self.rag_engine.index_file(path, content)
-            else:
-                QMessageBox.warning(self, "Error", f"Failed to save {path}")
 
 
