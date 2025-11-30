@@ -1,0 +1,7 @@
+PySide6
+requests
+markdown
+ollama
+lmstudio
+chromadb
+sentence-transformers
