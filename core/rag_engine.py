@@ -6,6 +6,7 @@ from typing import List, Tuple, Dict, Optional
 from datetime import datetime, timedelta
 from collections import OrderedDict
 import time
+import math
 
 # Token estimation: approximately 1 token per 4 characters for English text
 TOKENS_PER_CHAR = 0.25
@@ -17,6 +18,11 @@ CHUNK_OVERLAP_TOKENS = 50
 # Cache settings
 CACHE_TTL_SECONDS = 600  # 10 minutes
 CACHE_MAX_FILES = 5
+
+# Hybrid search weights
+KEYWORD_WEIGHT = 0.4
+SEMANTIC_WEIGHT = 0.6
+MIN_HYBRID_RESULTS = 3  # Minimum results guaranteed
 
 class ChunkMetadata:
     """Metadata for a chunk with heading hierarchy and location info."""
@@ -150,6 +156,59 @@ class QueryCache:
             "hit_rate": f"{hit_rate:.1f}%",
             "cached_queries": len(self.cache)
         }
+
+class SimpleBM25:
+    """Simple BM25 implementation for keyword-based ranking."""
+    
+    def __init__(self, k1=1.5, b=0.75):
+        self.k1 = k1  # Term frequency saturation parameter
+        self.b = b    # Length normalization parameter
+        self.documents = []  # List of tokenized documents
+        self.idf = {}  # Inverse document frequency cache
+        self.avg_doc_length = 0
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization: lowercase, split on whitespace, remove short tokens."""
+        tokens = text.lower().split()
+        # Filter out very short tokens and common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'in', 'to', 'of', 'for', 'on', 'with', 'at', 'by'}
+        return [t for t in tokens if len(t) > 2 and t not in stop_words]
+    
+    def index(self, documents: List[str]):
+        """Index a list of documents."""
+        self.documents = [self._tokenize(doc) for doc in documents]
+        self.avg_doc_length = sum(len(doc) for doc in self.documents) / len(self.documents) if self.documents else 0
+        
+        # Calculate IDF for all terms
+        doc_frequencies = {}
+        for doc in self.documents:
+            for term in set(doc):
+                doc_frequencies[term] = doc_frequencies.get(term, 0) + 1
+        
+        total_docs = len(self.documents)
+        for term, freq in doc_frequencies.items():
+            self.idf[term] = math.log((total_docs - freq + 0.5) / (freq + 0.5) + 1)
+    
+    def score(self, query: str) -> List[float]:
+        """Score all documents for a query. Returns list of scores."""
+        query_tokens = self._tokenize(query)
+        scores = []
+        
+        for doc in self.documents:
+            score = 0
+            for token in query_tokens:
+                if token in self.idf:
+                    # Count occurrences in document
+                    term_freq = doc.count(token)
+                    if term_freq > 0:
+                        idf = self.idf[token]
+                        # BM25 formula
+                        numerator = idf * term_freq * (self.k1 + 1)
+                        denominator = term_freq + self.k1 * (1 - self.b + self.b * len(doc) / max(self.avg_doc_length, 1))
+                        score += numerator / denominator
+            scores.append(score)
+        
+        return scores
 
 class MarkdownChunker:
     """Intelligent chunker for Markdown documents."""
@@ -289,7 +348,9 @@ class MarkdownChunker:
         # Flush remaining chunk
         if len(current_chunk) > 0:
             chunk_text = '\n'.join(current_chunk).strip()
-            if self.estimate_tokens(chunk_text) >= self.min_tokens:
+            # Always include the final chunk, even if smaller than min_tokens
+            # This ensures small documents and tail sections aren't lost
+            if chunk_text:
                 metadata = ChunkMetadata(
                     source=file_path,
                     heading_path=[h[1] for h in heading_stack],
@@ -322,6 +383,10 @@ class RAGEngine:
         
         # Initialize query cache
         self.query_cache = QueryCache(ttl_seconds=CACHE_TTL_SECONDS, max_files=CACHE_MAX_FILES)
+        
+        # Initialize BM25 indexer for hybrid search
+        self.bm25 = SimpleBM25()
+        self._all_chunks = []  # Keep track of all indexed chunks for BM25
 
     def index_file(self, file_path, content, invalidate_cache=True):
         """Indexes a single file using Markdown-aware chunking."""
@@ -351,6 +416,12 @@ class RAGEngine:
             ids=ids
         )
         
+        # Update BM25 index with all documents
+        all_docs = self.collection.get()
+        if all_docs['documents']:
+            self._all_chunks = list(zip(all_docs['ids'], all_docs['documents']))
+            self.bm25.index(all_docs['documents'])
+        
         # Invalidate cache for this file (unless bulk indexing)
         if invalidate_cache:
             self.query_cache.invalidate_file(file_path)
@@ -363,8 +434,8 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(chunks)} chunks for {file_path}")
 
-    def query(self, query_text, n_results=3, debug=False):
-        """Retrieves relevant chunks for the query with caching."""
+    def query(self, query_text, n_results=3, debug=False, use_hybrid=True):
+        """Retrieves relevant chunks with optional hybrid search (BM25 + semantic)."""
         # Try cache first
         cached_results = self.query_cache.get(query_text)
         if cached_results is not None:
@@ -373,22 +444,102 @@ class RAGEngine:
                 print(f"[RAG Cache] HIT - Query: '{query_text[:50]}...' | Stats: {stats}")
             return cached_results
         
-        # Cache miss - query the collection
-        results = self.collection.query(
+        # If hybrid search is disabled or BM25 not ready, use semantic search only
+        if not use_hybrid or not self._all_chunks:
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+            result_docs = results['documents'][0] if results['documents'] else []
+            result_sources = [meta.get('source', 'unknown') for meta in results['metadatas'][0]] if results['metadatas'] else []
+            self.query_cache.set(query_text, result_docs, result_sources)
+            
+            if debug:
+                stats = self.query_cache.get_stats()
+                print(f"[RAG Cache] MISS (semantic-only) - Query: '{query_text[:50]}...' | Sources: {result_sources} | Stats: {stats}")
+            
+            return result_docs
+        
+        # HYBRID SEARCH: Combine BM25 keyword search with semantic embeddings
+        
+        # 1. Get semantic results from Chroma
+        semantic_results = self.collection.query(
             query_texts=[query_text],
-            n_results=n_results
+            n_results=n_results * 2  # Get more results to re-rank
         )
         
-        # Extract results
-        result_docs = results['documents'][0] if results['documents'] else []
-        result_sources = [meta.get('source', 'unknown') for meta in results['metadatas'][0]] if results['metadatas'] else []
+        semantic_docs = semantic_results['documents'][0] if semantic_results['documents'] else []
+        semantic_ids = semantic_results['ids'][0] if semantic_results['ids'] else []
+        semantic_distances = semantic_results['distances'][0] if semantic_results['distances'] else []
         
-        # Store in cache with file sources
+        # Convert distances to similarity scores (1 - distance)
+        semantic_scores = {doc_id: 1 - (distance / 2) for doc_id, distance in zip(semantic_ids, semantic_distances)}
+        
+        # Normalize semantic scores to 0-1
+        max_semantic = max(semantic_scores.values()) if semantic_scores else 1
+        if max_semantic > 0:
+            semantic_scores = {k: v / max_semantic for k, v in semantic_scores.items()}
+        
+        # 2. Get BM25 keyword scores
+        bm25_scores_all = self.bm25.score(query_text)
+        bm25_scores = {}
+        for chunk_id, bm25_score in zip([cid for cid, _ in self._all_chunks], bm25_scores_all):
+            bm25_scores[chunk_id] = bm25_score
+        
+        # Normalize BM25 scores to 0-1
+        max_bm25 = max(bm25_scores.values()) if bm25_scores else 1
+        if max_bm25 > 0:
+            bm25_scores = {k: v / max_bm25 for k, v in bm25_scores.items()}
+        
+        # 3. Combine scores: hybrid_score = (keyword_weight * bm25 + semantic_weight * semantic)
+        hybrid_scores = {}
+        all_ids = set(semantic_scores.keys()) | set(bm25_scores.keys())
+        
+        for doc_id in all_ids:
+            semantic_score = semantic_scores.get(doc_id, 0)
+            bm25_score = bm25_scores.get(doc_id, 0)
+            hybrid_scores[doc_id] = (KEYWORD_WEIGHT * bm25_score) + (SEMANTIC_WEIGHT * semantic_score)
+        
+        # 4. Rank by hybrid score
+        sorted_results = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 5. Apply fallback strategy: ensure minimum results
+        selected_ids = [doc_id for doc_id, _ in sorted_results[:n_results]]
+        
+        # If we have too few results, add more from BM25 or semantic scores
+        if len(selected_ids) < MIN_HYBRID_RESULTS:
+            remaining_ids = [doc_id for doc_id, _ in sorted_results[n_results:]]
+            selected_ids.extend(remaining_ids[:MIN_HYBRID_RESULTS - len(selected_ids)])
+        
+        # 6. Build final result list in score order
+        result_docs = []
+        result_sources = []
+        result_scores = []
+        
+        for chunk_id in selected_ids:
+            # Find the document text and metadata
+            for stored_id, stored_doc in self._all_chunks:
+                if stored_id == chunk_id:
+                    result_docs.append(stored_doc)
+                    score = hybrid_scores.get(chunk_id, 0)
+                    result_scores.append(score)
+                    # Get source from metadata
+                    meta = self.collection.get(ids=[chunk_id])
+                    if meta['metadatas']:
+                        source = meta['metadatas'][0].get('source', 'unknown')
+                        result_sources.append(source)
+                    break
+        
+        # Store in cache
         self.query_cache.set(query_text, result_docs, result_sources)
         
         if debug:
             stats = self.query_cache.get_stats()
-            print(f"[RAG Cache] MISS - Query: '{query_text[:50]}...' | Sources: {result_sources} | Stats: {stats}")
+            method_breakdown = f"BM25={KEYWORD_WEIGHT*100:.0f}% + Semantic={SEMANTIC_WEIGHT*100:.0f}%"
+            print(f"[RAG Cache] MISS (hybrid) - Query: '{query_text[:50]}...' | {method_breakdown}")
+            print(f"  Sources: {result_sources}")
+            print(f"  Hybrid Scores: {[f'{s:.2f}' for s in result_scores]}")
+            print(f"  Cache Stats: {stats}")
         
         return result_docs
 
