@@ -1,8 +1,11 @@
 from PySide6.QtCore import QThread, Signal
-from core.tools import WebReader, WebSearcher, WikiTool, ImageSearcher
+from core.tool_base import get_registry
 import os
 
+
 class ToolWorker(QThread):
+    """Worker thread for executing LLM tools."""
+    
     finished = Signal(str, object) # result_text, extra_data (e.g. image results)
 
     def __init__(self, tool_name, query):
@@ -11,29 +14,23 @@ class ToolWorker(QThread):
         self.query = query
 
     def run(self):
+        """Execute the requested tool."""
         try:
-            result_text = ""
-            extra_data = None
+            registry = get_registry()
+            tool = registry.get_tool(self.tool_name)
             
-            if self.tool_name == "WEB_READ":
-                reader = WebReader()
-                result_text = reader.read(self.query)
-            elif self.tool_name == "SEARCH":
-                searcher = WebSearcher()
-                result_text = searcher.search(self.query)
-            elif self.tool_name == "WIKI":
-                wiki = WikiTool()
-                result_text = wiki.search(self.query)
-            elif self.tool_name == "IMAGE":
-                img = ImageSearcher()
-                results = img.search(self.query)
-                if isinstance(results, str): # Error message
-                    result_text = results
-                else:
-                    result_text = f"Found {len(results)} images. Asking user to select..."
-                    extra_data = results
+            if tool is None:
+                self.finished.emit(f"Error: Unknown tool '{self.tool_name}'", None)
+                return
             
+            if not tool.is_available():
+                self.finished.emit(f"Error: Tool '{self.tool_name}' is not available (missing dependencies)", None)
+                return
+            
+            # Execute the tool
+            result_text, extra_data = tool.execute(self.query)
             self.finished.emit(result_text, extra_data)
+            
         except Exception as e:
             self.finished.emit(f"Tool Error: {e}", None)
 
@@ -74,15 +71,11 @@ class ChatWorker(QThread):
             # Reinforce the edit format instructions
             content += "\n\nREMINDER: To propose edits, you MUST use the :::UPDATE path/to/file:::\n...content...\n:::END::: format. Do not just print the code."
             
-            # Add Tool Capabilities
-            content += (
-                "\n\nYou have access to the following tools:\n"
-                "1. Read Web Page: :::TOOL:WEB_READ:https://url...::: (Use this for full article content)\n"
-                "2. Web Search: :::TOOL:SEARCH:query...:::\n"
-                "3. Wikipedia: :::TOOL:WIKI:query...::: (Returns summary only. Use WEB_READ on the returned link for full details)\n"
-                "4. Image Search: :::TOOL:IMAGE:query...:::\n"
-                "Use these formats to request information or images. Stop generating after the tool command."
-            )
+            # Add Tool Capabilities from registry
+            from core.tool_base import get_registry
+            tool_instructions = get_registry().get_tool_instructions()
+            if tool_instructions:
+                content += "\n\n" + tool_instructions
             
             msg = {"role": last_msg['role'], "content": content}
             if self.images:
