@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle, QInputDialog, QProgressDialog
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import Qt, QThread, Signal
 from gui.sidebar import Sidebar
@@ -19,7 +19,7 @@ import re
 import os
 import hashlib
 
-from gui.workers import ChatWorker
+from gui.workers import ChatWorker, BatchWorker
 
 
 class MainWindow(QMainWindow):
@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
         # Editor Area
         self.editor = EditorWidget()
         self.editor.modification_changed.connect(self.update_save_button_state) # Connect signal
+        self.editor.batch_edit_requested.connect(self.handle_batch_edit)
         self.content_splitter.addWidget(self.editor)
         
         # Image Studio
@@ -656,5 +657,44 @@ class MainWindow(QMainWindow):
                     content = self.project_manager.read_file(file_path)
                     if content is not None:
                         self.editor.open_file(file_path, content)
+
+    def handle_batch_edit(self, path, content):
+        instruction, ok = QInputDialog.getText(self, "Batch Edit", "Enter instruction for processing (e.g. 'Fix typos'):")
+        if ok and instruction:
+            # Create progress dialog
+            self.progress = QProgressDialog("Processing chunks...", "Cancel", 0, 100, self)
+            self.progress.setWindowModality(Qt.WindowModal)
+            self.progress.show()
+            
+            provider = self.get_llm_provider()
+            model = self.settings.value("ollama_model", "llama3")
+            
+            self.batch_worker = BatchWorker(provider, model, content, instruction)
+            self.batch_worker.progress_updated.connect(self.on_batch_progress)
+            self.batch_worker.finished.connect(lambda result: self.on_batch_finished(path, result))
+            self.batch_worker.error_occurred.connect(self.on_batch_error)
+            
+            self.progress.canceled.connect(self.batch_worker.cancel)
+            self.batch_worker.start()
+
+    def on_batch_progress(self, current, total):
+        self.progress.setMaximum(total)
+        self.progress.setValue(current)
+        self.progress.setLabelText(f"Processing chunk {current} of {total}...")
+
+    def on_batch_finished(self, path, result):
+        self.progress.close()
+        if result:
+            # check files open
+            if path in self.editor.open_files:
+                doc_widget = self.editor.open_files[path]
+                doc_widget.replace_content_undoable(result)
+                QMessageBox.information(self, "Batch Complete", "Batch processing finished. Changes applied to buffer.")
+            else:
+                 QMessageBox.warning(self, "Error", "File closed during processing.")
+    
+    def on_batch_error(self, error):
+        self.progress.close()
+        QMessageBox.critical(self, "Batch Error", f"An error occurred: {error}")
 
 

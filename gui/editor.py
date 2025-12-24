@@ -217,6 +217,7 @@ class CodeEditor(QPlainTextEdit):
 class DocumentWidget(QWidget):
     link_clicked = Signal(str) # Emits path or URL when a link is clicked
     modification_changed = Signal(bool) # Emits when modified state changes
+    batch_edit_requested = Signal(str, str) # Emits (path, content)
 
     def __init__(self, file_path, content, base_dir=None, parent=None):
         super().__init__(parent)
@@ -236,8 +237,13 @@ class DocumentWidget(QWidget):
         self.preview_btn.setCheckable(True)
         self.preview_btn.clicked.connect(self.show_preview)
         
+        self.batch_btn = QPushButton("Batch Edit")
+        self.batch_btn.setStatusTip("Process large file in chunks")
+        self.batch_btn.clicked.connect(self.request_batch_edit)
+        
         self.toolbar_layout.addWidget(self.edit_btn)
         self.toolbar_layout.addWidget(self.preview_btn)
+        self.toolbar_layout.addWidget(self.batch_btn)
         self.toolbar_layout.addStretch()
         
         self.layout.addLayout(self.toolbar_layout)
@@ -265,6 +271,9 @@ class DocumentWidget(QWidget):
         self.stack.addWidget(self.preview)
         
         self.layout.addWidget(self.stack)
+
+    def request_batch_edit(self):
+        self.batch_edit_requested.emit(self.file_path, self.get_content())
 
     def on_modification_changed(self, changed):
         self.modification_changed.emit(changed)
@@ -377,6 +386,7 @@ class ImageViewerWidget(QWidget):
 
 class EditorWidget(QWidget):
     modification_changed = Signal(bool) # Emits when current tab's modification state changes
+    batch_edit_requested = Signal(str, str) # path, content
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -409,6 +419,7 @@ class EditorWidget(QWidget):
             widget = DocumentWidget(path, content if content is not None else "", self.project_path)
             widget.link_clicked.connect(self.handle_link_click)
             widget.modification_changed.connect(lambda m: self.on_doc_modified(widget, m))
+            widget.batch_edit_requested.connect(self.propagate_batch_edit)
             
         widget.setProperty("file_path", path)
         
@@ -550,8 +561,9 @@ class EditorWidget(QWidget):
         self.tabs.addTab(widget, title)
         self.tabs.setCurrentWidget(widget)
 
-    def get_current_file(self):
-        current_widget = self.tabs.currentWidget()
         if isinstance(current_widget, DocumentWidget):
             return current_widget.property("file_path"), current_widget.get_content()
         return None, None
+
+    def propagate_batch_edit(self, path, content):
+        self.batch_edit_requested.emit(path, content)
