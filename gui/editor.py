@@ -561,9 +561,42 @@ class EditorWidget(QWidget):
         self.tabs.addTab(widget, title)
         self.tabs.setCurrentWidget(widget)
 
+    def get_current_file(self):
+        current_widget = self.tabs.currentWidget()
         if isinstance(current_widget, DocumentWidget):
             return current_widget.property("file_path"), current_widget.get_content()
         return None, None
 
     def propagate_batch_edit(self, path, content):
         self.batch_edit_requested.emit(path, content)
+
+    def update_open_file_path(self, old_path, new_path):
+        """Update tabs and internal mapping when a file or folder is renamed/moved.
+        - If a single file matches `old_path`, retarget it.
+        - If a folder moved/renamed, retarget all open files under that folder.
+        """
+        sep = os.sep
+        # Handle folder moves: update all open files under old_path
+        updated = False
+        for path in list(self.open_files.keys()):
+            if path == old_path or path.startswith(old_path + sep):
+                widget = self.open_files.pop(path)
+                # Compute new path
+                if path == old_path:
+                    new_widget_path = new_path
+                else:
+                    suffix = path[len(old_path):]
+                    new_widget_path = new_path + suffix
+                # Update widget property
+                widget.setProperty("file_path", new_widget_path)
+                # Update tab title
+                index = self.tabs.indexOf(widget)
+                if index != -1:
+                    title = os.path.basename(new_widget_path)
+                    if isinstance(widget, DocumentWidget) and widget.is_modified():
+                        title += " •"
+                    self.tabs.setTabText(index, title)
+                # Reinsert with new key
+                self.open_files[new_widget_path] = widget
+                updated = True
+        return updated

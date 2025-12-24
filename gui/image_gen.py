@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                                QComboBox, QPushButton, QFormLayout, QLineEdit, 
-                               QScrollArea, QSplitter, QProgressBar, QMessageBox, QFileDialog, QPlainTextEdit)
+                               QScrollArea, QSplitter, QProgressBar, QMessageBox, QFileDialog, QPlainTextEdit, QInputDialog)
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QImage
 from core.workflow_manager import WorkflowManager
@@ -244,27 +244,118 @@ class ImageGenWidget(QWidget):
         self.generate()
 
     def save_image(self):
+        """Save generated image to a chosen folder in the project, with option to create a subfolder."""
         if not self.current_image_data:
             return
-            
-        # Ask where to save
-        # Default to project assets if possible
-        start_dir = self.project_path if self.project_path else os.getcwd()
-        
-        # Create assets/images folder if it exists in project
-        if self.project_path:
-            assets_dir = os.path.join(self.project_path, "assets")
-            if not os.path.exists(assets_dir):
-                 # Optional: create it? Let's just default to project root if assets doesn't exist
-                 pass
-            else:
-                start_dir = assets_dir
-            
-        path, _ = QFileDialog.getSaveFileName(self, "Save Image", os.path.join(start_dir, "generated.png"), "Images (*.png *.jpg)")
-        if path:
+
+        # If no project set, fall back to old behavior
+        if not self.project_path or not os.path.isdir(self.project_path):
+            start_dir = os.getcwd()
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Image",
+                os.path.join(start_dir, "generated.png"),
+                "Images (*.png *.jpg *.webp)"
+            )
+            if path:
+                try:
+                    with open(path, "wb") as f:
+                        f.write(self.current_image_data)
+                    QMessageBox.information(self, "Success", f"Saved to {path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+            return
+
+        root_path = self.project_path
+
+        # Determine default start directory from settings (relative to project)
+        default_rel = self.settings.value("default_image_folder", "assets/images")
+        default_dir = os.path.join(root_path, default_rel)
+        start_dir = default_dir if os.path.isdir(default_dir) else root_path
+
+        # 1) Choose target folder within project
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder to save image",
+            start_dir,
+            QFileDialog.ShowDirsOnly
+        )
+
+        if not folder:
+            return
+
+        # Ensure selected folder is inside project
+        try:
+            if os.path.commonpath([folder, root_path]) != root_path:
+                QMessageBox.warning(self, "Invalid Folder", "Please choose a folder within the project.")
+                return
+        except ValueError:
+            # commonpath can raise if paths are on different drives or invalid
+            QMessageBox.warning(self, "Invalid Folder", "Please choose a valid folder within the project.")
+            return
+
+        # 2) Offer to create a new subfolder
+        create_reply = QMessageBox.question(
+            self,
+            "Create Subfolder",
+            "Create a new subfolder inside the selected folder?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
+
+        if create_reply == QMessageBox.Cancel:
+            return
+        if create_reply == QMessageBox.Yes:
+            subfolder_name, ok = QInputDialog.getText(
+                self,
+                "New Subfolder",
+                "Enter subfolder name:",
+                text="images"
+            )
+            if not ok:
+                return
+            subfolder_name = subfolder_name.strip()
+            if not subfolder_name:
+                QMessageBox.warning(self, "Invalid Name", "Subfolder name cannot be empty.")
+                return
+            folder = os.path.join(folder, subfolder_name)
             try:
-                with open(path, "wb") as f:
-                    f.write(self.current_image_data)
-                QMessageBox.information(self, "Success", f"Saved to {path}")
+                os.makedirs(folder, exist_ok=True)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to create folder: {e}")
+                return
+
+        # 3) Ask for filename (default .png)
+        default_name = "generated.png"
+        filename, ok = QInputDialog.getText(
+            self,
+            "Save Image",
+            "Enter filename (with extension):",
+            text=default_name
+        )
+        if not ok:
+            return
+        filename = filename.strip()
+        if not filename:
+            QMessageBox.warning(self, "Invalid Name", "Filename cannot be empty.")
+            return
+
+        full_path = os.path.join(folder, filename)
+
+        # 4) Check overwrite
+        if os.path.exists(full_path):
+            reply = QMessageBox.question(
+                self,
+                "File Exists",
+                f"{filename} already exists. Overwrite?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # 5) Write binary
+        try:
+            with open(full_path, "wb") as f:
+                f.write(self.current_image_data)
+            QMessageBox.information(self, "Success", f"Saved to {full_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save: {e}")

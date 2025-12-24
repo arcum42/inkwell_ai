@@ -6,3 +6,7 @@ lmstudio
 chromadb
 sentence-transformers
 websocket-client
+
+beautifulsoup4
+ddgs
+lxml

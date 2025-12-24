@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle, QInputDialog, QProgressDialog
-from PySide6.QtGui import QAction, QIcon
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication
 from gui.sidebar import Sidebar
 from core.project import ProjectManager
 from core.llm_provider import OllamaProvider, LMStudioProvider
@@ -19,7 +19,9 @@ import re
 import os
 import hashlib
 
-from gui.workers import ChatWorker, BatchWorker
+from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
+from gui.dialogs.image_dialog import ImageSelectionDialog
+import shutil
 
 
 class MainWindow(QMainWindow):
@@ -140,6 +142,40 @@ class MainWindow(QMainWindow):
         new_folder_act.setStatusTip("Create a new folder")
         new_folder_act.triggered.connect(lambda: self.sidebar.create_new_folder(self.sidebar.tree.currentIndex()))
         self.toolbar.addAction(new_folder_act)
+
+        # Rename
+        rename_act = QAction(QIcon.fromTheme("edit-rename"), "Rename", self)
+        if rename_act.icon().isNull():
+            rename_act.setIcon(style.standardIcon(QStyle.SP_FileDialogDetailedView))
+        rename_act.setStatusTip("Rename selected file/folder")
+        rename_act.triggered.connect(lambda: self.sidebar.rename_item(self.sidebar.tree.currentIndex()))
+        self.toolbar.addAction(rename_act)
+
+        # Move To
+        move_act = QAction(QIcon.fromTheme("transform-move"), "Move To…", self)
+        if move_act.icon().isNull():
+            move_act.setIcon(style.standardIcon(QStyle.SP_ArrowForward))
+        move_act.setStatusTip("Move selected file/folder")
+        move_act.triggered.connect(lambda: self.sidebar.move_item(self.sidebar.tree.currentIndex()))
+        self.toolbar.addAction(move_act)
+
+        # Undo File Change
+        file_undo_act = QAction(QIcon.fromTheme("edit-undo"), "Undo File Change", self)
+        if file_undo_act.icon().isNull():
+            file_undo_act.setIcon(style.standardIcon(QStyle.SP_ArrowBack))
+        file_undo_act.setStatusTip("Undo last file rename/move")
+        file_undo_act.setShortcut(QKeySequence("Ctrl+Alt+Z"))
+        file_undo_act.triggered.connect(self.undo_file_change)
+        self.toolbar.addAction(file_undo_act)
+
+        # Redo File Change
+        file_redo_act = QAction(QIcon.fromTheme("edit-redo"), "Redo File Change", self)
+        if file_redo_act.icon().isNull():
+            file_redo_act.setIcon(style.standardIcon(QStyle.SP_ArrowForward))
+        file_redo_act.setStatusTip("Redo last undone file rename/move")
+        file_redo_act.setShortcut(QKeySequence("Ctrl+Alt+Y"))
+        file_redo_act.triggered.connect(self.redo_file_change)
+        self.toolbar.addAction(file_redo_act)
         
         # Open Project
         open_act = QAction(style.standardIcon(QStyle.SP_DirOpenIcon), "Open Project", self)
@@ -272,6 +308,9 @@ class MainWindow(QMainWindow):
         # Sidebar
         self.sidebar = Sidebar()
         self.sidebar.tree.doubleClicked.connect(self.on_file_double_clicked)
+        # Keep editor tabs in sync when files are renamed or moved from sidebar
+        self.sidebar.file_renamed.connect(self.on_file_renamed)
+        self.sidebar.file_moved.connect(self.on_file_moved)
         self.main_splitter.addWidget(self.sidebar)
         
         # Content Splitter (Editor vs Chat)
@@ -292,7 +331,19 @@ class MainWindow(QMainWindow):
         self.chat = ChatWidget()
         self.chat.message_sent.connect(self.handle_chat_message)
         self.chat.link_clicked.connect(self.handle_chat_link)
+        self.chat.save_chat_requested.connect(self.handle_save_chat)
+        self.chat.copy_to_file_requested.connect(self.handle_copy_chat_to_file)
         self.content_splitter.addWidget(self.chat)
+
+        # Initialize model header with current settings
+        try:
+            provider = self.get_llm_provider()
+            model = self.settings.value("ollama_model", "llama3")
+            is_vision = provider.is_vision_model(model)
+            self.chat.update_model_info(model, is_vision)
+        except Exception:
+            # Fail silently; header will update on first message or settings change
+            pass
         
         # Set initial sizes
         self.main_splitter.setSizes([240, 960])
@@ -304,6 +355,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.welcome_widget)
         
         self.chat_history = [] # List of {"role": "user/assistant", "content": "..."}
+        # File operations history for undo/redo
+        self.file_ops_history = []  # list of {"type": "rename"|"move", "old": str, "new": str}
+        self.file_ops_redo = []     # stack for redo
         
         # Load Recent Projects for Welcome Screen
         self.update_welcome_screen()
@@ -334,6 +388,12 @@ class MainWindow(QMainWindow):
         
         provider = self.get_llm_provider()
         model = self.settings.value("ollama_model", "llama3")
+
+        # Update chat header to reflect current model and capability
+        try:
+            self.chat.update_model_info(model, provider.is_vision_model(model))
+        except Exception:
+            pass
         
         # Retrieve context if RAG is active
         context = []
@@ -368,11 +428,64 @@ class MainWindow(QMainWindow):
         if active_path and active_content:
             system_prompt += f"\nCurrently Open File ({active_path}):\n{active_content}\n"
         
-        # We need to pass the model to the worker/provider
-        # Show thinking indicator
         self.chat.show_thinking()
         
-        self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt)
+        system_prompt = self.settings.value("system_prompt", "You are a helpful coding assistant.")
+        
+        # Check Vision Capability
+        is_vision = provider.is_vision_model(model)
+        attached_images = []
+        attached_image_names = []
+        
+        if is_vision:
+            system_prompt += "\n\n[System] Current model is VISION CAPABLE. You can see images provided in the context."
+            
+            # Collect all open images from tabs
+            for i in range(self.editor.tabs.count()):
+                widget = self.editor.tabs.widget(i)
+                if isinstance(widget, ImageViewerWidget):
+                    path = widget.property("file_path")
+                    if path and os.path.exists(path):
+                        try:
+                            b64 = self.project_manager.get_image_base64(path)
+                            if b64:
+                                attached_images.append(b64)
+                                attached_image_names.append(os.path.basename(path))
+                        except Exception as e:
+                            print(f"DEBUG: Error reading open image {path}: {e}")
+            
+            # Also auto-detect images referenced in the message
+            found_paths = self.project_manager.find_images_in_text(message)
+            if found_paths:
+                print(f"DEBUG: Found referenced images in message: {found_paths}")
+                for p in found_paths:
+                    # Skip if already added from open tabs
+                    if any(b64 == self.project_manager.get_image_base64(p) for b64 in attached_images):
+                        continue
+                    b64 = self.project_manager.get_image_base64(p)
+                    if b64:
+                        attached_images.append(b64)
+                        attached_image_names.append(os.path.basename(p))
+            
+            if attached_image_names:
+                self.chat.append_message("System", f"<i>Attached images: {', '.join(attached_image_names)}</i>")
+
+        else:
+            system_prompt += "\n\n[System] Current model is TEXT ONLY."
+
+        # Inject Project Structure
+        if self.project_manager.root_path:
+            structure = self.project_manager.get_project_structure()
+            # We truncate if it's too huge
+            if len(structure) > 20000:
+                structure = structure[:20000] + "\n... (truncated)"
+            system_prompt += f"\n\nProject Structure:\n{structure}"
+            
+        # Add active file context
+        if active_path:
+             system_prompt += f"\n\nActive File: {active_path}\nContent:\n{active_content}"
+             
+        self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt, images=attached_images)
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
 
@@ -382,6 +495,20 @@ class MainWindow(QMainWindow):
         
         print(f"DEBUG: Raw AI Response:\n{response}")
         
+        # Parse for :::TOOL:...::: blocks
+        tool_pattern = r":::TOOL:(.*?):(.*?):::"
+        tool_match = re.search(tool_pattern, response)
+        if tool_match:
+            tool_name = tool_match.group(1).strip()
+            query = tool_match.group(2).strip()
+            self.chat.append_message("System", f"<i>Running tool: {tool_name}...</i>")
+            self.chat.show_thinking() # thinking again for tool
+            
+            self.tool_worker = ToolWorker(tool_name, query)
+            self.tool_worker.finished.connect(self.on_tool_finished)
+            self.tool_worker.start()
+            return # Stop processing other things if tool runs (it effectively continues the conversation)
+
         # Parse for :::UPDATE...::: blocks
         # Improved regex to handle whitespace/newlines more flexibly
         # Accepts :::END:::, :::END, or just ::: as the closer
@@ -394,9 +521,23 @@ class MainWindow(QMainWindow):
         
         if matches:
             import uuid
+            # Define non-text file extensions that shouldn't be edited
+            non_text_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', 
+                                  '.mp4', '.avi', '.mov', '.mp3', '.wav', 
+                                  '.pdf', '.zip', '.tar', '.gz', '.exe', '.bin'}
+            
             for path, content in matches:
                 path = path.strip()
                 content = content.strip().replace('\\n', '\n')
+                
+                # Check if this is a non-text file
+                file_ext = os.path.splitext(path)[1].lower()
+                if file_ext in non_text_extensions:
+                    # Convert to .txt file instead
+                    original_path = path
+                    path = os.path.splitext(path)[0] + '.txt'
+                    print(f"DEBUG: Converting non-text file edit from {original_path} to {path}")
+                
                 print(f"DEBUG: Parsed edit for {path}")
                 
                 edit_id = str(uuid.uuid4())
@@ -405,6 +546,14 @@ class MainWindow(QMainWindow):
             def replace_match(match):
                 m_path = match.group(1).strip()
                 m_content = match.group(2).strip().replace('\\n', '\n')
+                
+                # Check if this is a non-text file and convert to .txt
+                file_ext = os.path.splitext(m_path)[1].lower()
+                if file_ext in non_text_extensions:
+                    original_path = m_path
+                    m_path = os.path.splitext(m_path)[0] + '.txt'
+                    print(f"DEBUG: Converting non-text file edit from {original_path} to {m_path} (in display)")
+                
                 m_id = str(uuid.uuid4())
                 self.pending_edits[m_id] = (m_path, m_content)
                 return f'<br><b><a href="edit:{m_id}">Review Changes for {m_path}</a></b><br>'
@@ -525,9 +674,9 @@ class MainWindow(QMainWindow):
             
             # Initialize RAG
             self.rag_engine = RAGEngine(folder_path)
-            self.index_thread = QThread()
-            self.index_thread.run = self.rag_engine.index_project
-            self.index_thread.start()
+            # Start indexer worker with cancel support
+            self.index_worker = IndexWorker(self.rag_engine)
+            self.index_worker.start()
             
             # Restore Tabs
             self.restore_project_state(folder_path)
@@ -590,10 +739,18 @@ class MainWindow(QMainWindow):
             self.open_image_studio()
 
     def closeEvent(self, event):
-        # Save state and cleanup, but keep last_project setting so it auto-opens
-        if self.project_manager.root_path:
-            self._shutdown_project_session(clear_last_project=False)
-        super().closeEvent(event)
+        # Immediately cancel and terminate indexing worker
+        if hasattr(self, 'index_worker') and self.index_worker is not None:
+            try:
+                self.index_worker.cancel()
+                # Force terminate to avoid destructor issues
+                if self.index_worker.isRunning():
+                    self.index_worker.terminate()
+            except Exception:
+                pass
+        # Force hard exit immediately bypassing all cleanup
+        import os
+        os._exit(0)
 
     def close_project(self):
         # Save state, cleanup, and clear last_project setting
@@ -620,7 +777,13 @@ class MainWindow(QMainWindow):
         self.chat.history.clear()
         self.chat_history = []
         
-        # Stop RAG
+        # Cancel RAG indexing worker immediately
+        try:
+            if hasattr(self, 'index_worker') and self.index_worker is not None:
+                self.index_worker.cancel()
+                self.index_worker = None
+        except Exception:
+            pass
         self.rag_engine = None
         
         # Clear last project setting if requested (e.g. user explicitly closed project)
@@ -632,7 +795,15 @@ class MainWindow(QMainWindow):
 
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
-        dialog.exec()
+        if dialog.exec():
+            # After settings are saved, refresh chat header
+            try:
+                provider = self.get_llm_provider()
+                model = self.settings.value("ollama_model", "llama3")
+                is_vision = provider.is_vision_model(model)
+                self.chat.update_model_info(model, is_vision)
+            except Exception:
+                pass
 
     def open_image_studio(self):
         # Check if already open
@@ -696,5 +867,261 @@ class MainWindow(QMainWindow):
     def on_batch_error(self, error):
         self.progress.close()
         QMessageBox.critical(self, "Batch Error", f"An error occurred: {error}")
+
+    def on_tool_finished(self, result_text, extra_data):
+        self.chat.remove_thinking()
+        
+        if extra_data: # Image Results
+            # Fix AttributeError: use self.project_manager.root_path instead of self.project_path
+            dialog = ImageSelectionDialog(extra_data, self.project_manager.root_path, self)
+            if dialog.exec():
+                saved_paths = dialog.get_saved_paths()
+                if saved_paths:
+                    msg_lines = []
+                    for p in saved_paths:
+                        name = os.path.basename(p)
+                        self.chat.append_message("System", f"Image saved to: {name}")
+                        msg_lines.append(f"User selected and saved image to {name}")
+                    
+                    # Notify agent but DO NOT continue chat loop automatically
+                    # This prevents the AI from asking "Do you want another?" -> Tool -> Dialog loop
+                    result_msg = "\n".join(msg_lines)
+                    self.chat_history.append({"role": "user", "content": f"Tool Output: {result_msg}"})
+                    self.chat.append_message("System", "Task completed.")
+            else:
+                 self.chat.append_message("System", "Image selection cancelled.")
+                 self.chat_history.append({"role": "user", "content": "Tool Output: User cancelled image selection."})
+        else:
+            # Text result
+            # We append it to chat as a system/tool message but don't show it to user necessarily? 
+            # Or show it? Usually showing "Tool Output" is good.
+            # self.chat.append_message("Tool", result_text[:500] + "..." if len(result_text) > 500 else result_text)
+            
+            # Feed back to LLM
+            self.continue_chat_with_tool_result(result_text)
+
+    def continue_chat_with_tool_result(self, result):
+        # We need to send this result back to the LLM as if it were a system observation
+        # or just context, to continue the generation.
+        # Simple approach: append to history and trigger chat again.
+        
+        # We don't necessarily want this in the visible user chat history if it's long data.
+        # But for simplicity, we treat it as a "System" message in the context.
+        # self.chat_history is a list of dicts.
+        
+        # Context to LLM:
+        prompt = f"Tool Output: {result}\n\nContinue responding to the user."
+        
+        # Trigger chat
+        provider = self.get_llm_provider()
+        model = self.settings.value("ollama_model", "llama3")
+        
+        # We need to construct context including this new info
+        # We can append it to the last message contextually
+        context = [] # We rely on history mostly
+        
+        # Add to history structure but maybe NOT UI if we want to keep it clean?
+        # Let's add to UI for transparency
+        if len(result) < 200:
+            self.chat.append_message("Tool", result)
+        else:
+            self.chat.append_message("Tool", f"Result data ({len(result)} chars)...")
+
+        # Manually append to self.chat_history so worker picks it up?
+        # ChatWorker uses self.chat_history.
+        # But ChatWorker expects {"role":, "content":}
+        # Using "user" role often works better for forcing the model to pay attention to the new "data provided"
+        self.chat_history.append({"role": "user", "content": f"Tool Output: {result}"})
+        
+        self.chat.show_thinking()
+        system_prompt = self.settings.value("system_prompt", "You are a helpful coding assistant.")
+        
+        # Inject Project Structure
+        if self.project_manager.root_path:
+            structure = self.project_manager.get_project_structure()
+            # We truncate if it's too huge, but assuming it fits for now
+            if len(structure) > 20000:
+                structure = structure[:20000] + "\n... (truncated)"
+            system_prompt += f"\n\nProject Structure:\n{structure}"
+            
+        # Add active file context again? ChatWorker does it.
+        
+        self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt)
+        self.worker.response_received.connect(self.on_chat_response)
+        self.worker.start()
+
+    def handle_save_chat(self, chat_content):
+        """Save chat contents as a new file in the project."""
+        if not self.project_manager.get_root_path():
+            QMessageBox.warning(self, "No Project", "Please open a project first to save chat.")
+            return
+        
+        root_path = self.project_manager.get_root_path()
+        
+        # Open folder selection dialog
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder to save chat",
+            root_path,
+            QFileDialog.ShowDirsOnly
+        )
+        
+        if not folder:
+            return
+        
+        # Verify folder is within project
+        if not os.path.commonpath([folder, root_path]) == root_path:
+            QMessageBox.warning(self, "Invalid Folder", "Please select a folder within the project.")
+            return
+        
+        # Ask user for filename
+        filename, ok = QInputDialog.getText(
+            self, "Save Chat", "Enter filename (without extension):",
+            text="chat_export"
+        )
+        
+        if ok and filename:
+            # Ensure it doesn't have extension already
+            if '.' in filename:
+                filename = filename.split('.')[0]
+            
+            # Use relative path from root for save_file
+            relative_folder = os.path.relpath(folder, root_path)
+            if relative_folder == '.':
+                relative_path = f"{filename}.md"
+            else:
+                relative_path = os.path.join(relative_folder, f"{filename}.md")
+            
+            full_path = os.path.join(root_path, relative_path)
+            
+            # Check if file exists
+            if os.path.exists(full_path):
+                reply = QMessageBox.question(
+                    self, "File Exists",
+                    f"{filename}.md already exists. Overwrite?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            
+            try:
+                self.project_manager.save_file(relative_path, chat_content)
+                QMessageBox.information(self, "Success", f"Chat saved to {relative_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save chat: {e}")
+
+    def handle_copy_chat_to_file(self, chat_content):
+        """Copy chat contents to the currently open file."""
+        if not self.editor.open_files:
+            QMessageBox.warning(self, "No File Open", "Please open a file first to copy chat contents.")
+            return
+        
+        current_path, current_content = self.editor.get_current_file()
+        
+        if not current_path:
+            QMessageBox.warning(self, "No File Open", "Please open a file first to copy chat contents.")
+            return
+        
+        # Ask user how to append
+        reply = QMessageBox.question(
+            self, "Append Chat",
+            f"Append chat to {current_path}?\n\nYes = Append to end\nNo = Replace contents",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
+        
+        if reply == QMessageBox.Cancel:
+            return
+        
+        if reply == QMessageBox.Yes:
+            # Append to end
+            new_content = (current_content if current_content else "") + "\n\n" + chat_content
+        else:
+            # Replace contents
+            new_content = chat_content
+        
+        # Apply to buffer (Undoable)
+        doc_widget = self.editor.open_files[current_path]
+        doc_widget.replace_content_undoable(new_content)
+        self.statusBar().showMessage(f"Chat copied to {current_path} (not saved yet)", 3000)
+
+    def on_file_renamed(self, old_path, new_path):
+        """Update open editor tabs when a file is renamed from the sidebar."""
+        try:
+            self.editor.update_open_file_path(old_path, new_path)
+            # Record operation and clear redo stack
+            self.file_ops_history.append({"type": "rename", "old": old_path, "new": new_path})
+            self.file_ops_redo.clear()
+            self.statusBar().showMessage(f"Renamed: {os.path.basename(old_path)} → {os.path.basename(new_path)}", 3000)
+        except Exception as e:
+            # Non-critical; just log
+            print(f"WARN: Failed to update editor after rename: {e}")
+
+    def on_file_moved(self, old_path, new_path):
+        """Update open editor tabs when a file is moved from the sidebar."""
+        try:
+            self.editor.update_open_file_path(old_path, new_path)
+            # Record operation and clear redo stack
+            self.file_ops_history.append({"type": "move", "old": old_path, "new": new_path})
+            self.file_ops_redo.clear()
+            self.statusBar().showMessage(f"Moved: {os.path.basename(old_path)} → {os.path.basename(new_path)}", 3000)
+        except Exception as e:
+            print(f"WARN: Failed to update editor after move: {e}")
+
+    def _perform_move(self, src, dst):
+        """Move/rename path with basic validation and conflict checking."""
+        if not os.path.exists(src):
+            QMessageBox.warning(self, "Not Found", f"Source does not exist: {src}")
+            return False
+        if os.path.exists(dst):
+            reply = QMessageBox.question(
+                self, "File Exists",
+                f"{os.path.basename(dst)} exists. Overwrite?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return False
+            # If overwriting a file with a folder or vice versa could be unsafe; rely on shutil semantics
+        try:
+            shutil.move(src, dst)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to move: {e}")
+            return False
+
+    def undo_file_change(self):
+        """Undo the last file rename/move."""
+        if not self.file_ops_history:
+            self.statusBar().showMessage("No file changes to undo", 2000)
+            return
+        op = self.file_ops_history.pop()
+        src = op["new"]
+        dst = op["old"]
+        if self._perform_move(src, dst):
+            # Update editor tabs
+            try:
+                self.editor.update_open_file_path(src, dst)
+            except Exception:
+                pass
+            # Push to redo stack
+            self.file_ops_redo.append(op)
+            self.statusBar().showMessage(f"Undid {op['type']}: {os.path.basename(src)} → {os.path.basename(dst)}", 3000)
+
+    def redo_file_change(self):
+        """Redo the last undone file rename/move."""
+        if not self.file_ops_redo:
+            self.statusBar().showMessage("No file changes to redo", 2000)
+            return
+        op = self.file_ops_redo.pop()
+        src = op["old"]
+        dst = op["new"]
+        if self._perform_move(src, dst):
+            # Update editor tabs
+            try:
+                self.editor.update_open_file_path(src, dst)
+            except Exception:
+                pass
+            # Push back to history
+            self.file_ops_history.append(op)
+            self.statusBar().showMessage(f"Redid {op['type']}: {os.path.basename(src)} → {os.path.basename(dst)}", 3000)
 
 
