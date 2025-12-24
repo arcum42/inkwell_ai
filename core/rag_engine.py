@@ -617,15 +617,26 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(chunks)} chunks for {file_path}")
 
-    def query(self, query_text, n_results=3, debug=False, use_hybrid=True):
-        """Retrieves relevant chunks with optional hybrid search (BM25 + semantic)."""
-        # Try cache first
-        cached_results = self.query_cache.get(query_text)
-        if cached_results is not None:
-            if debug:
-                stats = self.query_cache.get_stats()
-                print(f"[RAG Cache] HIT - Query: '{query_text[:50]}...' | Stats: {stats}")
-            return cached_results
+    def query(self, query_text, n_results=3, debug=False, use_hybrid=True, include_metadata=False):
+        """Retrieves relevant chunks with optional hybrid search (BM25 + semantic).
+
+        Args:
+            query_text: Query text
+            n_results: Number of chunks to return
+            debug: Print debug info
+            use_hybrid: Use BM25 + semantic hybrid search when True
+            include_metadata: Return list of {text, metadata} when True
+        """
+        use_cache = not include_metadata
+
+        # Try cache first (only when metadata is not requested)
+        if use_cache:
+            cached_results = self.query_cache.get(query_text)
+            if cached_results is not None:
+                if debug:
+                    stats = self.query_cache.get_stats()
+                    print(f"[RAG Cache] HIT - Query: '{query_text[:50]}...' | Stats: {stats}")
+                return cached_results
         
         # If hybrid search is disabled or BM25 not ready, use semantic search only
         if not use_hybrid or not self._all_chunks:
@@ -634,8 +645,23 @@ class RAGEngine:
                 n_results=n_results
             )
             result_docs = results['documents'][0] if results['documents'] else []
-            result_sources = [meta.get('source', 'unknown') for meta in results['metadatas'][0]] if results['metadatas'] else []
-            self.query_cache.set(query_text, result_docs, result_sources)
+            result_metas = results['metadatas'][0] if results['metadatas'] else []
+            result_sources = [meta.get('source', 'unknown') for meta in result_metas]
+
+            if include_metadata:
+                entries = []
+                distances = results['distances'][0] if results['distances'] else []
+                for doc, meta, distance in zip(result_docs, result_metas, distances):
+                    score = 1 - (distance / 2) if distance is not None else 0
+                    meta_copy = dict(meta)
+                    meta_copy['score'] = score
+                    entries.append({"text": doc, "metadata": meta_copy})
+                if debug:
+                    print(f"[RAG] Semantic-only results with metadata: {len(entries)} chunks")
+                return entries
+
+            if use_cache:
+                self.query_cache.set(query_text, result_docs, result_sources)
             
             if debug:
                 stats = self.query_cache.get_stats()
@@ -713,9 +739,27 @@ class RAGEngine:
                         result_sources.append(source)
                     break
         
-        # Store in cache
-        self.query_cache.set(query_text, result_docs, result_sources)
+        # Store in cache when allowed
+        if use_cache:
+            self.query_cache.set(query_text, result_docs, result_sources)
         
+        if include_metadata:
+            entries = []
+            for chunk_id, chunk_text in zip(selected_ids, result_docs):
+                meta = self.collection.get(ids=[chunk_id])
+                meta_dict = meta['metadatas'][0] if meta['metadatas'] else {}
+                meta_copy = dict(meta_dict)
+                meta_copy['score'] = hybrid_scores.get(chunk_id, 0)
+                entries.append({"text": chunk_text, "metadata": meta_copy})
+            if debug:
+                stats = self.query_cache.get_stats()
+                method_breakdown = f"BM25={KEYWORD_WEIGHT*100:.0f}% + Semantic={SEMANTIC_WEIGHT*100:.0f}%"
+                print(f"[RAG Cache] MISS (hybrid) - Query: '{query_text[:50]}...' | {method_breakdown}")
+                print(f"  Sources: {result_sources}")
+                print(f"  Hybrid Scores: {[f'{s:.2f}' for s in result_scores]}")
+                print(f"  Cache Stats: {stats}")
+            return entries
+
         if debug:
             stats = self.query_cache.get_stats()
             method_breakdown = f"BM25={KEYWORD_WEIGHT*100:.0f}% + Semantic={SEMANTIC_WEIGHT*100:.0f}%"

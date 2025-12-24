@@ -472,14 +472,15 @@ class MainWindow(QMainWindow):
         
         if self.context_level != "none" and self.rag_engine:
             print(f"DEBUG: Querying RAG for: {message}")
-            context = self.rag_engine.query(message)
+            context = self.rag_engine.query(message, n_results=5, include_metadata=True)
             print(f"DEBUG: Retrieved {len(context)} chunks")
             
             # Extract mentioned file paths and estimate tokens
             rag_file_info = []
             for chunk in context:
-                if "metadata" in chunk and "source" in chunk["metadata"]:
-                    source = chunk["metadata"]["source"]
+                meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                source = meta.get("source")
+                if source:
                     mentioned_files.add(source)
             
             if mentioned_files:

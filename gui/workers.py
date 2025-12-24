@@ -75,8 +75,32 @@ class ChatWorker(QThread):
             content = last_msg['content']
             
             if self.context:
-                # Assuming context is a list of strings (chunks)
-                context_str = "\n\n".join(self.context)
+                context_chunks = []
+                footnotes = []
+                for idx, chunk in enumerate(self.context, 1):
+                    if isinstance(chunk, dict):
+                        chunk_text = chunk.get("text", "")
+                        meta = chunk.get("metadata", {})
+                        source = meta.get("source", "unknown")
+                        start_line = meta.get("start_line")
+                        end_line = meta.get("end_line")
+                        heading_path = " > ".join(meta.get("heading_path", [])) if meta.get("heading_path") else ""
+                        line_str = ""
+                        if start_line is not None and end_line is not None:
+                            line_str = f"#L{start_line}-L{end_line}"
+                        footnote = f"[^{idx}]: {source}{line_str}"
+                        if heading_path:
+                            footnote += f" — {heading_path}"
+                        context_chunks.append(f"[^{idx}] {chunk_text}")
+                        footnotes.append(footnote)
+                    else:
+                        context_chunks.append(str(chunk))
+
+                context_str = "\n\n".join(context_chunks)
+                if footnotes:
+                    footnote_block = "\n".join(footnotes)
+                    context_str += f"\n\nCitations:\n{footnote_block}"
+                    content += "\n\nWhen referencing context, include footnotes like [^1] that match the Citations section."
                 content += f"\n\nContext:\n{context_str}"
 
             # Reinforce the edit format instructions
