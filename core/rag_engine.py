@@ -3,7 +3,9 @@ import re
 import chromadb
 from chromadb.utils import embedding_functions
 from typing import List, Tuple, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import OrderedDict
+import time
 
 # Token estimation: approximately 1 token per 4 characters for English text
 TOKENS_PER_CHAR = 0.25
@@ -11,6 +13,10 @@ MIN_CHUNK_TOKENS = 50  # Lowered to capture smaller sections
 DEFAULT_CHUNK_TOKENS = 500
 MAX_CHUNK_TOKENS = 1500
 CHUNK_OVERLAP_TOKENS = 50
+
+# Cache settings
+CACHE_TTL_SECONDS = 600  # 10 minutes
+CACHE_MAX_FILES = 5
 
 class ChunkMetadata:
     """Metadata for a chunk with heading hierarchy and location info."""
@@ -31,6 +37,118 @@ class ChunkMetadata:
             "end_line": self.end_line,
             "content_type": self.content_type,
             "chunk_index": self.chunk_index
+        }
+
+class QueryCache:
+    """Cache for RAG query results with TTL and file tracking."""
+    
+    def __init__(self, ttl_seconds=CACHE_TTL_SECONDS, max_files=CACHE_MAX_FILES):
+        self.ttl_seconds = ttl_seconds
+        self.max_files = max_files
+        self.cache = OrderedDict()  # {query_text: (results, timestamp, file_paths_used)}
+        self.file_timestamps = {}   # {file_path: last_mtime}
+        self.stats = {"hits": 0, "misses": 0, "invalidations": 0}
+    
+    def get(self, query_text: str, file_paths_context: List[str] = None) -> Optional[List[str]]:
+        """Retrieve cached results if valid. Returns None if expired or invalidated."""
+        if query_text not in self.cache:
+            self.stats["misses"] += 1
+            return None
+        
+        results, timestamp, cached_files = self.cache[query_text]
+        
+        # Check TTL
+        if time.time() - timestamp > self.ttl_seconds:
+            del self.cache[query_text]
+            self.stats["invalidations"] += 1
+            self.stats["misses"] += 1
+            return None
+        
+        # Check if any cached files have been modified
+        for file_path in cached_files:
+            if not os.path.exists(file_path):
+                # File was deleted, invalidate cache
+                del self.cache[query_text]
+                self.stats["invalidations"] += 1
+                self.stats["misses"] += 1
+                return None
+            
+            try:
+                current_mtime = os.path.getmtime(file_path)
+                if file_path not in self.file_timestamps:
+                    # First time seeing this file, store its mtime
+                    self.file_timestamps[file_path] = current_mtime
+                elif current_mtime > self.file_timestamps[file_path]:
+                    # File has been modified since cache entry
+                    del self.cache[query_text]
+                    self.stats["invalidations"] += 1
+                    self.stats["misses"] += 1
+                    return None
+            except OSError:
+                # Can't access file, invalidate cache
+                del self.cache[query_text]
+                self.stats["invalidations"] += 1
+                self.stats["misses"] += 1
+                return None
+        
+        # Cache hit
+        self.stats["hits"] += 1
+        return results
+    
+    def set(self, query_text: str, results: List[str], file_paths_used: List[str] = None):
+        """Store query results in cache."""
+        if file_paths_used is None:
+            file_paths_used = []
+        
+        # Update file timestamps for files that exist
+        for file_path in file_paths_used:
+            if os.path.exists(file_path):
+                try:
+                    self.file_timestamps[file_path] = os.path.getmtime(file_path)
+                except (OSError, FileNotFoundError):
+                    pass
+        
+        # Enforce cache size limit
+        if len(self.cache) >= self.max_files:
+            # Remove oldest entry (FIFO)
+            self.cache.popitem(last=False)
+        
+        self.cache[query_text] = (results, time.time(), file_paths_used)
+    
+    def invalidate_file(self, file_path: str):
+        """Invalidate all cache entries that used this file."""
+        invalidated_count = 0
+        queries_to_remove = [
+            query for query, (_, _, files) in self.cache.items()
+            if file_path in files
+        ]
+        for query in queries_to_remove:
+            del self.cache[query]
+            invalidated_count += 1
+        
+        if invalidated_count > 0:
+            self.stats["invalidations"] += invalidated_count
+            print(f"[RAG Cache] Invalidated {invalidated_count} cache entries for {file_path}")
+    
+    def invalidate_all(self):
+        """Clear all cache entries."""
+        count = len(self.cache)
+        self.cache.clear()
+        self.file_timestamps.clear()
+        if count > 0:
+            self.stats["invalidations"] += count
+            print(f"[RAG Cache] Cleared all {count} cache entries")
+    
+    def get_stats(self) -> Dict:
+        """Return cache statistics."""
+        total_queries = self.stats["hits"] + self.stats["misses"]
+        hit_rate = (self.stats["hits"] / total_queries * 100) if total_queries > 0 else 0
+        return {
+            "hits": self.stats["hits"],
+            "misses": self.stats["misses"],
+            "invalidations": self.stats["invalidations"],
+            "hit_rate": f"{hit_rate:.1f}%",
+            "cached_queries": len(self.cache)
         }
 
 class MarkdownChunker:
@@ -201,8 +319,11 @@ class RAGEngine:
         
         # Initialize chunker
         self.chunker = MarkdownChunker()
+        
+        # Initialize query cache
+        self.query_cache = QueryCache(ttl_seconds=CACHE_TTL_SECONDS, max_files=CACHE_MAX_FILES)
 
-    def index_file(self, file_path, content):
+    def index_file(self, file_path, content, invalidate_cache=True):
         """Indexes a single file using Markdown-aware chunking."""
         if not content:
             return
@@ -230,6 +351,10 @@ class RAGEngine:
             ids=ids
         )
         
+        # Invalidate cache for this file (unless bulk indexing)
+        if invalidate_cache:
+            self.query_cache.invalidate_file(file_path)
+        
         # Track indexed file with modification time
         try:
             self._indexed_files[file_path] = os.path.getmtime(file_path)
@@ -238,16 +363,34 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(chunks)} chunks for {file_path}")
 
-    def query(self, query_text, n_results=3):
-        """Retrieves relevant chunks for the query."""
+    def query(self, query_text, n_results=3, debug=False):
+        """Retrieves relevant chunks for the query with caching."""
+        # Try cache first
+        cached_results = self.query_cache.get(query_text)
+        if cached_results is not None:
+            if debug:
+                stats = self.query_cache.get_stats()
+                print(f"[RAG Cache] HIT - Query: '{query_text[:50]}...' | Stats: {stats}")
+            return cached_results
+        
+        # Cache miss - query the collection
         results = self.collection.query(
             query_texts=[query_text],
             n_results=n_results
         )
-        # results['documents'] is a list of lists (one list per query)
-        if results['documents']:
-            return results['documents'][0]
-        return []
+        
+        # Extract results
+        result_docs = results['documents'][0] if results['documents'] else []
+        result_sources = [meta.get('source', 'unknown') for meta in results['metadatas'][0]] if results['metadatas'] else []
+        
+        # Store in cache with file sources
+        self.query_cache.set(query_text, result_docs, result_sources)
+        
+        if debug:
+            stats = self.query_cache.get_stats()
+            print(f"[RAG Cache] MISS - Query: '{query_text[:50]}...' | Sources: {result_sources} | Stats: {stats}")
+        
+        return result_docs
 
     def get_file_index_status(self, file_path):
         """Get index status for a file.
@@ -270,6 +413,9 @@ class RAGEngine:
     
     def index_project(self):
         """Walks the project and indexes all markdown files."""
+        # Invalidate entire cache for bulk reindexing
+        self.query_cache.invalidate_all()
+        
         for root, dirs, files in os.walk(self.project_path):
             if ".inkwell_rag" in root:
                 continue
@@ -279,7 +425,8 @@ class RAGEngine:
                     try:
                         with open(path, 'r', encoding='utf-8') as f:
                             content = f.read()
-                        self.index_file(path, content)
+                        # Don't invalidate cache individually during bulk indexing
+                        self.index_file(path, content, invalidate_cache=False)
                     except Exception as e:
                         print(f"[RAG] Error indexing {path}: {e}")
 
