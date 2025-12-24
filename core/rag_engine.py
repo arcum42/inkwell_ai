@@ -16,6 +16,9 @@ class RAGEngine:
         # Create or get collection
         # We use the default embedding function (all-MiniLM-L6-v2)
         self.collection = self.client.get_or_create_collection(name="project_docs")
+        
+        # Cache of indexed file mtimes for status tracking
+        self._indexed_files = {}  # path -> mtime
 
     def index_file(self, file_path, content):
         """Indexes a single file. Splits content into chunks."""
@@ -38,6 +41,11 @@ class RAGEngine:
             metadatas=metadatas,
             ids=ids
         )
+        # Track indexed file with modification time
+        try:
+            self._indexed_files[file_path] = os.path.getmtime(file_path)
+        except Exception:
+            pass
         print(f"Indexed {len(chunks)} chunks for {file_path}")
 
     def query(self, query_text, n_results=3):
@@ -51,6 +59,25 @@ class RAGEngine:
             return results['documents'][0]
         return []
 
+    def get_file_index_status(self, file_path):
+        """Get index status for a file.
+        Returns: 'indexed', 'needs_reindex', 'not_indexed'
+        """
+        if not file_path.endswith(('.md', '.txt')):
+            return None
+        
+        if file_path not in self._indexed_files:
+            return 'not_indexed'
+        
+        try:
+            current_mtime = os.path.getmtime(file_path)
+            indexed_mtime = self._indexed_files[file_path]
+            if current_mtime > indexed_mtime:
+                return 'needs_reindex'
+            return 'indexed'
+        except Exception:
+            return 'not_indexed'
+    
     def index_project(self):
         """Walks the project and indexes all markdown files."""
         for root, dirs, files in os.walk(self.project_path):

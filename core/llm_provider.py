@@ -36,12 +36,25 @@ class OllamaProvider(LLMProvider):
         # Convert messages to format expected by ollama lib if needed
         # The lib expects [{'role': 'user', 'content': '...'}, ...] which matches our internal format
         print(f"DEBUG: Sending chat to Ollama. Model: {model}, URL: {self.client._client.base_url}")
+        print(f"DEBUG: Messages structure: {[{k: type(v).__name__ if k != 'content' else (v[:50] + '...' if len(v) > 50 else v) for k, v in msg.items()} for msg in messages]}")
         try:
             response = self.client.chat(model=model, messages=messages)
-            return response['message']['content']
+            print(f"DEBUG: Ollama response type: {type(response)}, keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+            # Validate response structure
+            if isinstance(response, dict):
+                message = response.get('message')
+                if isinstance(message, dict):
+                    content = message.get('content')
+                    if content is not None:
+                        return content
+                    return f"Error: No content in Ollama response. Response structure: {list(message.keys())}"
+                return f"Error: Invalid message format in Ollama response. Type: {type(message)}, Response keys: {list(response.keys())}"
+            return f"Error: Ollama returned non-dict response. Type: {type(response)}, Value: {response}"
         except ollama.ResponseError as e:
             return f"Error: {e.error}"
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return f"Error: {e}"
 
     def list_models(self):
@@ -108,6 +121,17 @@ class LMStudioProvider(LLMProvider):
                     })
                 
                 new_msg['content'] = content
+            else:
+                # Ensure content is a plain string for non-vision messages
+                if isinstance(new_msg.get('content'), list):
+                    try:
+                        txt = " ".join(
+                            part.get('text', '') if isinstance(part, dict) else str(part)
+                            for part in new_msg['content']
+                        ).strip()
+                        new_msg['content'] = txt or ""
+                    except Exception:
+                        new_msg['content'] = str(new_msg['content'])
             
             converted_messages.append(new_msg)
         
@@ -115,19 +139,68 @@ class LMStudioProvider(LLMProvider):
         payload = {
             "model": model,
             "messages": converted_messages,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "max_tokens": 1024,
         }
         try:
-            response = requests.post(url, json=payload)
+            response = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
             response.raise_for_status()
             return response.json()['choices'][0]['message']['content']
         except requests.exceptions.HTTPError as e:
             # Provide more detailed error info
+            status = e.response.status_code if e.response is not None else "HTTPError"
+            body_text = None
+            body_json = None
             try:
-                error_detail = e.response.json()
-                return f"Error: {e.response.status_code} - {error_detail.get('error', {}).get('message', str(e))}"
-            except:
-                return f"Error: {e}"
+                body_json = e.response.json()
+            except Exception:
+                try:
+                    body_text = e.response.text
+                except Exception:
+                    body_text = None
+            # Summarize payload for debugging without dumping full content
+            payload_summary = {
+                "model": payload.get("model"),
+                "messages_count": len(payload.get("messages", [])),
+                "last_role": payload.get("messages", [{}])[-1].get("role"),
+                "last_content_type": type(payload.get("messages", [{}])[-1].get("content")).__name__,
+            }
+            # Handle body_json whether it's dict, string, or other
+            if body_json is not None:
+                if isinstance(body_json, dict):
+                    # Extract error message from dict
+                    # Try nested error.message first, then top-level error or message
+                    if 'error' in body_json:
+                        error_val = body_json['error']
+                        if isinstance(error_val, dict):
+                            msg = error_val.get('message', str(error_val))
+                        else:
+                            msg = str(error_val)
+                    elif 'message' in body_json:
+                        msg = str(body_json['message'])
+                    else:
+                        msg = str(body_json)
+                    
+                    # Check if this is a context length error and provide helpful info
+                    if 'context length' in msg.lower() or 'context overflow' in msg.lower():
+                        context_len = self.get_model_context_length(model)
+                        if context_len:
+                            msg += f"\n\nℹ️ Model '{model}' has context length: {context_len} tokens. Try:\n" \
+                                   f"  • Reload model in LM Studio with larger context (e.g., 8192 or 16384)\n" \
+                                   f"  • Reduce chat history or RAG context"
+                        else:
+                            msg += f"\n\nℹ️ Try reloading model '{model}' in LM Studio with larger context length"
+                else:
+                    msg = str(body_json)
+                return f"Error: {status} - {msg}"
+            if body_text:
+                return f"Error: {status} - {body_text} | Payload: {payload_summary}"
+            return f"Error: {status} - {str(e)} | Payload: {payload_summary}"
         except Exception as e:
             return f"Error: {e}"
 
@@ -148,6 +221,28 @@ class LMStudioProvider(LLMProvider):
         except Exception as e:
             print(f"Error listing LM Studio models: {e}")
             return []
+
+    def get_model_context_length(self, model_name):
+        """Get the context length for a specific model from LM Studio.
+        Returns None if unable to retrieve.
+        """
+        try:
+            url = f"{self.base_url}/v1/models"
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            for m in data.get("data", []):
+                if m.get("id") == model_name or m.get("model") == model_name:
+                    # Try various possible field names for context length
+                    return (m.get("max_model_len") or 
+                           m.get("context_length") or 
+                           m.get("max_context_length") or
+                           m.get("n_ctx"))
+            return None
+        except Exception as e:
+            print(f"Error getting model context length: {e}")
+            return None
 
     def is_vision_model(self, model_name):
         """Detect vision capability for LM Studio models via /v1/models metadata.

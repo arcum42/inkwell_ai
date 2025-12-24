@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle, QInputDialog, QProgressDialog
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle, QInputDialog, QProgressDialog, QProgressBar
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication
 from gui.sidebar import Sidebar
@@ -18,10 +18,24 @@ from gui.dialogs.diff_dialog import DiffDialog
 import re
 import os
 import hashlib
+import difflib
 
 from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
 from gui.dialogs.image_dialog import ImageSelectionDialog
 import shutil
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count using a simple heuristic.
+    Approximates: ~1 token per 4 characters on average.
+    This is a rough estimate that works for most models."""
+    if not text:
+        return 0
+    # More sophisticated: count words and adjust for punctuation
+    words = len(text.split())
+    chars = len(text)
+    # Average of 4 chars per token
+    return max(words // 2, chars // 4)
 
 
 class MainWindow(QMainWindow):
@@ -34,6 +48,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("InkwellAI", "InkwellAI")
         self.rag_engine = None
         self.pending_edits = {} # id -> (path, content)
+        self.index_worker = None
         
         # ... (Menu Bar setup) ...
         # We need to initialize editor before connecting signals, but editor is in stack?
@@ -114,6 +129,10 @@ class MainWindow(QMainWindow):
         image_studio_action = QAction("Image Studio", self)
         image_studio_action.triggered.connect(self.open_image_studio)
         view_menu.addAction(image_studio_action)
+        
+        chat_history_action = QAction("Chat History...", self)
+        chat_history_action.triggered.connect(self.open_chat_history)
+        view_menu.addAction(chat_history_action)
         
         # Toolbar
         self.toolbar = self.addToolBar("Main Toolbar")
@@ -321,6 +340,7 @@ class MainWindow(QMainWindow):
         self.editor = EditorWidget()
         self.editor.modification_changed.connect(self.update_save_button_state) # Connect signal
         self.editor.batch_edit_requested.connect(self.handle_batch_edit)
+        self.editor.tab_closed.connect(self.save_project_state) # Save state when tabs are closed
         self.content_splitter.addWidget(self.editor)
         
         # Image Studio
@@ -333,17 +353,17 @@ class MainWindow(QMainWindow):
         self.chat.link_clicked.connect(self.handle_chat_link)
         self.chat.save_chat_requested.connect(self.handle_save_chat)
         self.chat.copy_to_file_requested.connect(self.handle_copy_chat_to_file)
+        self.chat.message_deleted.connect(self.handle_message_deleted)
+        self.chat.message_edited.connect(self.handle_message_edited)
+        self.chat.regenerate_requested.connect(self.handle_regenerate)
+        self.chat.provider_changed.connect(self.on_provider_changed)
+        self.chat.model_changed.connect(self.on_model_changed)
+        self.chat.refresh_models_requested.connect(self.on_refresh_models)
+        self.chat.context_level_changed.connect(self.on_context_level_changed)
         self.content_splitter.addWidget(self.chat)
 
-        # Initialize model header with current settings
-        try:
-            provider = self.get_llm_provider()
-            model = self.settings.value("ollama_model", "llama3")
-            is_vision = provider.is_vision_model(model)
-            self.chat.update_model_info(model, is_vision)
-        except Exception:
-            # Fail silently; header will update on first message or settings change
-            pass
+        # Initialize model controls
+        self.update_model_controls()
         
         # Set initial sizes
         self.main_splitter.setSizes([240, 960])
@@ -355,6 +375,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.welcome_widget)
         
         self.chat_history = [] # List of {"role": "user/assistant", "content": "..."}
+        self.context_level = "visible"  # Default context level
         # File operations history for undo/redo
         self.file_ops_history = []  # list of {"type": "rename"|"move", "old": str, "new": str}
         self.file_ops_redo = []     # stack for redo
@@ -374,6 +395,52 @@ class MainWindow(QMainWindow):
             recent_projects = []
         self.welcome_widget.set_recent_projects(recent_projects)
 
+    def update_model_controls(self):
+        """Update model controls with current settings and available models."""
+        try:
+            provider_name = self.settings.value("llm_provider", "Ollama")
+            provider = self.get_llm_provider()
+            
+            # Get available models
+            models = provider.list_models()
+            
+            # Determine which models support vision
+            vision_models = [m for m in models if provider.is_vision_model(m)]
+            
+            # Get current model based on provider
+            if provider_name == "Ollama":
+                current_model = self.settings.value("ollama_model", "llama3")
+            else:
+                current_model = self.settings.value("lm_studio_model", "default")
+            
+            # Update UI with vision model indicators
+            self.chat.update_model_info(provider_name, current_model, models, vision_models)
+        except Exception as e:
+            print(f"DEBUG: Failed to update model controls: {e}")
+            # Set defaults
+            self.chat.update_model_info("Ollama", "llama3", ["llama3"], [])
+    
+    def on_provider_changed(self, provider_name):
+        """Handle provider selection change."""
+        self.settings.setValue("llm_provider", provider_name)
+        self.update_model_controls()
+    
+    def on_model_changed(self, model_name):
+        """Handle model selection change."""
+        provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "Ollama":
+            self.settings.setValue("ollama_model", model_name)
+        else:
+            self.settings.setValue("lm_studio_model", model_name)
+    
+    def on_refresh_models(self):
+        """Refresh available models from provider."""
+        self.update_model_controls()
+    
+    def on_context_level_changed(self, level):
+        """Handle context level change."""
+        self.context_level = level
+
     def get_llm_provider(self):
         provider_name = self.settings.value("llm_provider", "Ollama")
         if provider_name == "Ollama":
@@ -384,49 +451,94 @@ class MainWindow(QMainWindow):
             return LMStudioProvider(base_url=url)
 
     def handle_chat_message(self, message):
+        print(f"DEBUG: Context level for this message: {self.context_level}")
         self.chat_history.append({"role": "user", "content": message})
         
         provider = self.get_llm_provider()
         model = self.settings.value("ollama_model", "llama3")
 
-        # Update chat header to reflect current model and capability
+        # Update chat header to reflect current model
         try:
-            self.chat.update_model_info(model, provider.is_vision_model(model))
+            provider_name = self.settings.value("llm_provider", "Ollama")
+            models = provider.list_models()
+            vision_models = [m for m in models if provider.is_vision_model(m)]
+            self.chat.update_model_info(provider_name, model, models, vision_models)
         except Exception:
             pass
         
-        # Retrieve context if RAG is active
+        # Retrieve context if RAG is active and context level allows
         context = []
-        if self.rag_engine:
+        mentioned_files = set()
+        
+        if self.context_level != "none" and self.rag_engine:
             print(f"DEBUG: Querying RAG for: {message}")
             context = self.rag_engine.query(message)
             print(f"DEBUG: Retrieved {len(context)} chunks")
             
-        # Add Active File Context
+            # Extract mentioned file paths and estimate tokens
+            rag_file_info = []
+            for chunk in context:
+                if "metadata" in chunk and "source" in chunk["metadata"]:
+                    source = chunk["metadata"]["source"]
+                    mentioned_files.add(source)
+            
+            if mentioned_files:
+                for source in sorted(mentioned_files):
+                    try:
+                        content = self.project_manager.read_file(source)
+                        if content:
+                            tokens = estimate_tokens(content)
+                            rag_file_info.append(f"{source} ({tokens} tokens)")
+                    except Exception:
+                        pass
+                
+                if rag_file_info:
+                    print(f"DEBUG: Files from RAG context: {', '.join(rag_file_info)}")
+            
+        # Add Active File Context based on context level
         active_path, active_content = self.editor.get_current_file()
         system_prompt = (
             "You are Inkwell AI, a creative writing assistant.\n"
             "You can read project files and propose edits.\n"
-            "To propose an edit or create a file, output the content in this format:\n"
+            "To propose an edit or create a file, output ONLY the formatted block:\n"
             ":::UPDATE path/to/file.md:::\n"
             "New Content Here...\n"
             ":::END:::\n"
-            "To generate an image, use this format:\n"
+            "Do NOT include explanations, reminders, or extra text before or after the block.\n"
+            "Do NOT repeat instructions in your response.\n"
+            "To generate an image, use this format (also no extra text):\n"
             ":::GENERATE_IMAGE:::\n"
             "Prompt: A description of the image...\n"
             "Workflow: image_z_image_turbo (Optional, defaults to current)\n"
             ":::END:::\n"
-            "IMPORTANT: You must close the block with :::END:::.\n"
-            "If the file does not exist, it will be created.\n"
-            "Example:\n"
-            ":::UPDATE Characters/Pip.md:::\n"
-            "# Pip\n"
-            "Role: Healer\n"
-            ":::END:::\n"
+            "IMPORTANT: Always close blocks with :::END:::.\n"
         )
         
-        if active_path and active_content:
+        # Include active file if not in "none" mode
+        if active_path and active_content and self.context_level != "none":
+            tokens = estimate_tokens(active_content)
+            print(f"DEBUG: Including active file in context: {active_path} ({tokens} tokens)")
             system_prompt += f"\nCurrently Open File ({active_path}):\n{active_content}\n"
+        
+        # Add other open tabs if context level is "all_open" or "full"
+        if self.context_level in ("all_open", "full"):
+            open_files = []
+            for i in range(self.editor.tabs.count()):
+                tab_widget = self.editor.tabs.widget(i)
+                tab_path = tab_widget.property("file_path") if hasattr(tab_widget, 'property') else None
+                
+                if tab_path and tab_path != active_path:
+                    try:
+                        content = self.project_manager.read_file(tab_path)
+                        if content:
+                            tokens = estimate_tokens(content)
+                            open_files.append(f"{tab_path} ({tokens} tokens)")
+                            system_prompt += f"\nOpen File ({tab_path}):\n{content}\n"
+                    except Exception:
+                        pass
+            
+            if open_files:
+                print(f"DEBUG: Including open tabs in context: {', '.join(open_files)}")
         
         self.chat.show_thinking()
         
@@ -485,9 +597,55 @@ class MainWindow(QMainWindow):
         if active_path:
              system_prompt += f"\n\nActive File: {active_path}\nContent:\n{active_content}"
              
-        self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt, images=attached_images)
+        enabled_tools = self.project_manager.get_enabled_tools()
+        self.worker = ChatWorker(
+            provider,
+            self.chat_history,
+            model,
+            context,
+            system_prompt,
+            images=attached_images,
+            enabled_tools=enabled_tools,
+        )
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
+
+    def is_response_complete(self, response: str) -> bool:
+        """Check if the response appears complete.
+        Returns False if response is likely incomplete (missing closing blocks, etc.)"""
+        # Check for incomplete UPDATE blocks
+        update_opens = response.count(":::UPDATE")
+        update_closes = response.count(":::END:::") + response.count(":::END") + response.count(":::")
+        # Note: this is a heuristic; could have false positives but better safe than sorry
+        
+        # If there are unclosed UPDATE blocks, response is incomplete
+        if update_opens > 0 and update_closes < update_opens:
+            return False
+        
+        # Check for incomplete GENERATE_IMAGE blocks
+        gen_opens = response.count(":::GENERATE_IMAGE")
+        if gen_opens > 0 and update_closes < gen_opens:
+            return False
+        
+        # If response ends abruptly with specific tokens, it's likely incomplete
+        incomplete_endings = [
+            "- ",
+            "* ",
+            "1. ",
+            ": ",
+            "and ",
+            "or ",
+            "in ",
+            "the ",
+        ]
+        
+        # Only flag if it's a very short ending
+        if len(response) > 50:
+            for ending in incomplete_endings:
+                if response.rstrip().endswith(ending):
+                    return False
+        
+        return True
 
     def on_chat_response(self, response):
         # Remove thinking indicator
@@ -504,20 +662,41 @@ class MainWindow(QMainWindow):
             self.chat.append_message("System", f"<i>Running tool: {tool_name}...</i>")
             self.chat.show_thinking() # thinking again for tool
             
-            self.tool_worker = ToolWorker(tool_name, query)
+            self.tool_worker = ToolWorker(tool_name, query, enabled_tools=self.project_manager.get_enabled_tools(), project_manager=self.project_manager)
             self.tool_worker.finished.connect(self.on_tool_finished)
             self.tool_worker.start()
             return # Stop processing other things if tool runs (it effectively continues the conversation)
 
+        # Strip common prefixes that models might add (reminder text, etc.)
+        processing_response = response
+        reminder_pattern = r"^[^\n]*REMINDER[^\n]*:.*?\n+"
+        processing_response = re.sub(reminder_pattern, "", processing_response, flags=re.IGNORECASE)
+
         # Parse for :::UPDATE...::: blocks
-        # Improved regex to handle whitespace/newlines more flexibly
+        # Improved regex to handle whitespace/newlines, quoted paths
         # Accepts :::END:::, :::END, or just ::: as the closer
         pattern = r":::UPDATE\s*(.*?)\s*:::\s*\n(.*?)\s*(?::::END:::|:::END|:::)"
-        matches = re.findall(pattern, response, re.DOTALL)
+        matches = re.findall(pattern, processing_response, re.DOTALL)
+        # Fallback parsing: allow quoted paths or path on next line
+        if not matches:
+            alt_pattern = r":::UPDATE\s*(?:\"([^\"]+)\"|'([^']+)'|([^:]+))\s*:::\s*\n(.*?)\s*(?::::END:::|:::END|:::)"
+            alt = re.findall(alt_pattern, processing_response, re.DOTALL)
+            # alt is list of tuples with possibly empty groups; pick first non-empty path group
+            normalized = []
+            for g1, g2, g3, content in alt:
+                path = g1 or g2 or g3 or ""
+                normalized.append((path, content))
+            matches = normalized
         
         print(f"DEBUG: Found {len(matches)} edit blocks")
         
         display_response = response
+        
+        # Determine active file for path normalization during edit parsing
+        try:
+            active_path = self.editor.get_current_file()[0]
+        except Exception:
+            active_path = None
         
         if matches:
             import uuid
@@ -527,7 +706,7 @@ class MainWindow(QMainWindow):
                                   '.pdf', '.zip', '.tar', '.gz', '.exe', '.bin'}
             
             for path, content in matches:
-                path = path.strip()
+                path = self._normalize_edit_path(path.strip(), active_path)
                 content = content.strip().replace('\\n', '\n')
                 
                 # Check if this is a non-text file
@@ -544,7 +723,7 @@ class MainWindow(QMainWindow):
                 self.pending_edits[edit_id] = (path, content)
                 
             def replace_match(match):
-                m_path = match.group(1).strip()
+                m_path = self._normalize_edit_path(match.group(1).strip(), active_path)
                 m_content = match.group(2).strip().replace('\\n', '\n')
                 
                 # Check if this is a non-text file and convert to .txt
@@ -590,6 +769,95 @@ class MainWindow(QMainWindow):
 
         self.chat.append_message("AI", display_response)
         self.chat_history.append({"role": "assistant", "content": response})
+        
+        # Check if response appears incomplete and auto-continue if needed
+        if not self.is_response_complete(response):
+            print(f"DEBUG: Response appears incomplete, auto-continuing...")
+            self.chat.show_thinking()
+            self._continue_response()
+        else:
+            # Auto-save chat session after each exchange (only if complete)
+            self.save_current_chat_session()
+    
+    def _continue_response(self):
+        """Automatically continue the previous response."""
+        provider = self.get_llm_provider()
+        model = self.settings.value("ollama_model", "llama3")
+        
+        self.chat_worker = ChatWorker(
+            self.chat_history,
+            provider,
+            model,
+            system_prompt=self.settings.value("system_prompt", "You are a helpful coding assistant."),
+            context_level=self.context_level,
+            project_manager=self.project_manager if self.project_manager else None
+        )
+        self.chat_worker.response_ready.connect(self.on_chat_response)
+        self.chat_worker.start()
+
+    def _normalize_edit_path(self, raw_path: str, active_path: str | None) -> str:
+        """Make path extraction more forgiving.
+        - Strip quotes/backticks/angle brackets
+        - Collapse redundant slashes
+        - If path seems to be just a basename, try to resolve in project
+        - Fallback to active file when path is empty
+        """
+        path = raw_path.strip()
+        # Remove enclosing quotes/backticks/angle brackets
+        if (path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'")):
+            path = path[1:-1]
+        if (path.startswith('<') and path.endswith('>')) or (path.startswith('`') and path.endswith('`')):
+            path = path[1:-1]
+        # Remove leading ./ and collapse multiple slashes
+        path = path.replace('\\', '/').lstrip('./')
+        while '//' in path:
+            path = path.replace('//', '/')
+        path = path.strip()
+        # If empty, fallback to active file if available
+        if not path and active_path:
+            return active_path
+        # If it's an absolute path within project, convert to relative
+        if self.project_manager.root_path and os.path.isabs(path):
+            try:
+                rel = os.path.relpath(path, self.project_manager.root_path)
+                if not rel.startswith('..'):
+                    path = rel
+            except Exception:
+                pass
+        # If no directories (basename only), try to resolve in project
+        if '/' not in path and self.project_manager.root_path:
+            candidates = []
+            for root, dirs, files in os.walk(self.project_manager.root_path):
+                for f in files:
+                    if f == path:
+                        candidates.append(os.path.relpath(os.path.join(root, f), self.project_manager.root_path))
+            if len(candidates) == 1:
+                return candidates[0]
+            elif len(candidates) > 1 and active_path:
+                # Prefer same directory as active file when possible
+                active_dir = os.path.dirname(active_path)
+                for c in candidates:
+                    if os.path.dirname(c) == active_dir:
+                        return c
+                # Fallback to closest match by dir length
+                candidates.sort(key=lambda p: len(os.path.dirname(p)))
+                return candidates[0]
+        # Fuzzy correction: if path not found, try close matches against project files
+        if self.project_manager.root_path:
+            target = path.split('/')[-1]
+            index = []
+            for root, dirs, files in os.walk(self.project_manager.root_path):
+                for f in files:
+                    index.append(os.path.relpath(os.path.join(root, f), self.project_manager.root_path))
+            basenames = [os.path.basename(p) for p in index]
+            matches = difflib.get_close_matches(target, basenames, n=1, cutoff=0.8)
+            if matches:
+                m = matches[0]
+                # Pick the path whose basename equals the match
+                for p in index:
+                    if os.path.basename(p) == m:
+                        return p
+        return path
 
     def handle_chat_link(self, url):
         if url.startswith("edit:"):
@@ -674,9 +942,22 @@ class MainWindow(QMainWindow):
             
             # Initialize RAG
             self.rag_engine = RAGEngine(folder_path)
+            
+            # Connect RAG engine to sidebar for status indicators
+            if hasattr(self, 'sidebar'):
+                self.sidebar.set_rag_engine(self.rag_engine)
+            
             # Start indexer worker with cancel support
             self.index_worker = IndexWorker(self.rag_engine)
+            self.index_worker.progress.connect(self.on_index_progress)
+            self.index_worker.finished.connect(self.on_index_finished)
             self.index_worker.start()
+            
+            # Show progress bar
+            self.indexing_progress = QProgressBar()
+            self.indexing_progress.setTextVisible(True)
+            self.indexing_progress.setFormat("Indexing: %p% (%v/%m)")
+            self.statusBar().addWidget(self.indexing_progress)
             
             # Restore Tabs
             self.restore_project_state(folder_path)
@@ -737,6 +1018,26 @@ class MainWindow(QMainWindow):
         image_studio_open = self.settings.value(f"state/{key}/image_studio_open", False, type=bool)
         if image_studio_open:
             self.open_image_studio()
+    
+    def on_index_progress(self, current, total, file_path):
+        """Update progress bar during indexing."""
+        if hasattr(self, 'indexing_progress'):
+            self.indexing_progress.setMaximum(total)
+            self.indexing_progress.setValue(current)
+            # Update sidebar to show indexed file status
+            if self.rag_engine and hasattr(self, 'sidebar'):
+                self.sidebar.update_file_status()
+    
+    def on_index_finished(self):
+        """Clean up after indexing completes."""
+        if hasattr(self, 'indexing_progress'):
+            self.statusBar().removeWidget(self.indexing_progress)
+            self.indexing_progress.deleteLater()
+            del self.indexing_progress
+        # Final update of file statuses
+        if hasattr(self, 'sidebar'):
+            self.sidebar.update_file_status()
+        print("Indexing complete")
 
     def closeEvent(self, event):
         # Immediately cancel and terminate indexing worker
@@ -774,7 +1075,8 @@ class MainWindow(QMainWindow):
         self.editor.open_files.clear()
         
         # Clear chat
-        self.chat.history.clear()
+        self.save_current_chat_session()  # Save before clearing
+        self.chat.clear_chat()
         self.chat_history = []
         
         # Cancel RAG indexing worker immediately
@@ -796,14 +1098,8 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
         if dialog.exec():
-            # After settings are saved, refresh chat header
-            try:
-                provider = self.get_llm_provider()
-                model = self.settings.value("ollama_model", "llama3")
-                is_vision = provider.is_vision_model(model)
-                self.chat.update_model_info(model, is_vision)
-            except Exception:
-                pass
+            # After settings are saved, refresh model controls
+            self.update_model_controls()
 
     def open_image_studio(self):
         # Check if already open
@@ -946,7 +1242,14 @@ class MainWindow(QMainWindow):
             
         # Add active file context again? ChatWorker does it.
         
-        self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt)
+        self.worker = ChatWorker(
+            provider,
+            self.chat_history,
+            model,
+            context,
+            system_prompt,
+            enabled_tools=self.project_manager.get_enabled_tools(),
+        )
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
 
@@ -1043,6 +1346,140 @@ class MainWindow(QMainWindow):
         doc_widget = self.editor.open_files[current_path]
         doc_widget.replace_content_undoable(new_content)
         self.statusBar().showMessage(f"Chat copied to {current_path} (not saved yet)", 3000)
+    
+    def handle_message_deleted(self, msg_index):
+        """Handle deletion of a chat message."""
+        if msg_index < len(self.chat_history):
+            # Remove from history
+            del self.chat_history[msg_index]
+            
+            # Remove from chat display
+            del self.chat.messages[msg_index]
+            self.chat.rebuild_chat_display()
+            
+            self.statusBar().showMessage("Message deleted", 2000)
+    
+    def handle_message_edited(self, msg_index, new_content):
+        """Handle editing of a chat message."""
+        if msg_index < len(self.chat_history):
+            # Update history with new content
+            self.chat_history[msg_index]['content'] = new_content
+            
+            self.statusBar().showMessage("Message edited", 2000)
+    
+    def handle_regenerate(self):
+        """Regenerate the last AI response."""
+        if not self.chat_history:
+            return
+        
+        # Find the last assistant message and last user message before it
+        last_assistant_idx = None
+        last_user_idx = None
+        
+        for i in range(len(self.chat_history) - 1, -1, -1):
+            if self.chat_history[i]['role'] == 'assistant' and last_assistant_idx is None:
+                last_assistant_idx = i
+            elif self.chat_history[i]['role'] == 'user' and last_assistant_idx is not None and last_user_idx is None:
+                last_user_idx = i
+                break
+        
+        if last_assistant_idx is None:
+            QMessageBox.information(self, "Nothing to Regenerate", "No AI response found to regenerate.")
+            return
+        
+        # Remove the last assistant message
+        del self.chat_history[last_assistant_idx]
+        del self.chat.messages[last_assistant_idx]
+        self.chat.rebuild_chat_display()
+        
+        # Show thinking indicator
+        self.chat.show_thinking()
+        
+        # Resend the request
+        provider = self.get_llm_provider()
+        model = self.settings.value("ollama_model", "llama3")
+        
+        # Get RAG context if available
+        context = None
+        if self.rag_engine and last_user_idx is not None:
+            query = self.chat_history[last_user_idx]['content']
+            print(f"DEBUG: Querying RAG for: {query}")
+            context = self.rag_engine.query(query)
+            print(f"DEBUG: Retrieved {len(context) if context else 0} chunks")
+        
+        # Build system prompt
+        system_prompt = self.settings.value("system_prompt", "You are a helpful AI assistant.")
+        
+        # Include project structure if enabled
+        if self.project_manager.root_path and self.settings.value("include_project_structure", True, type=bool):
+            structure = self.project_manager.get_project_structure()
+            if len(structure) > 20000:
+                structure = structure[:20000] + "\n... (truncated)"
+            system_prompt += f"\n\nProject Structure:\n{structure}"
+        
+        enabled_tools = self.project_manager.get_enabled_tools()
+        self.worker = ChatWorker(
+            provider,
+            self.chat_history,
+            model,
+            context,
+            system_prompt,
+            images=None,
+            enabled_tools=enabled_tools,
+        )
+        self.worker.response_received.connect(self.on_chat_response)
+        self.worker.start()
+    
+    def save_current_chat_session(self):
+        """Save the current chat session to history."""
+        if not self.chat_history:
+            self.statusBar().showMessage("No chat to save", 2000)
+            return
+        
+        # Get title from first user message
+        title = "Untitled Chat"
+        for msg in self.chat_history:
+            if msg['role'] == 'user':
+                title = msg['content'][:50]  # First 50 chars
+                if len(msg['content']) > 50:
+                    title += "..."
+                break
+        
+        # Create session object
+        from datetime import datetime
+        session = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'title': title,
+            'messages': list(self.chat_history)  # Copy the list
+        }
+        
+        # Add to history
+        chat_sessions = self.settings.value("chat_history", [])
+        if not isinstance(chat_sessions, list):
+            chat_sessions = []
+        
+        chat_sessions.append(session)
+        
+        # Keep only last 50 sessions to avoid bloat
+        if len(chat_sessions) > 50:
+            chat_sessions = chat_sessions[-50:]
+        
+        self.settings.setValue("chat_history", chat_sessions)
+        self.statusBar().showMessage("Chat saved to history", 2000)
+    
+    def open_chat_history(self):
+        """Open the chat history dialog."""
+        from gui.dialogs.chat_history_dialog import ChatHistoryDialog
+        
+        dialog = ChatHistoryDialog(self.settings, self)
+        dialog.message_copy_requested.connect(self.copy_message_to_current_chat)
+        dialog.exec()
+    
+    def copy_message_to_current_chat(self, message_content):
+        """Copy a message from history to current chat and send it."""
+        # Add to input field but don't send automatically
+        self.chat.input_field.setPlainText(message_content)
+        self.chat.input_field.setFocus()
 
     def on_file_renamed(self, old_path, new_path):
         """Update open editor tabs when a file is renamed from the sidebar."""

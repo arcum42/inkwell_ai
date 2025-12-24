@@ -832,6 +832,159 @@ class ToolMetrics:
 - Tool lifecycle documentation
 - Testing guidelines
 
+#### Creating Tools with Configurable Settings
+
+All tools inherit from the `Tool` base class and can define configurable settings that users can adjust per-project. This allows tools to be flexible without hardcoding values.
+
+**Step 1: Define Settings Schema**
+
+Override `get_configurable_settings()` to return a dict of setting definitions:
+
+```python
+def get_configurable_settings(self) -> Dict[str, Any]:
+    """Return dict of setting names to default values for this tool.
+    
+    Format:
+    {
+        "setting_name": {
+            "default": value,
+            "type": "int"|"str"|"bool",
+            "description": "User-facing description"
+        },
+        ...
+    }
+    """
+    return {
+        "max_results": {
+            "default": 5,
+            "type": "int",
+            "description": "Maximum search results to return"
+        },
+        "timeout": {
+            "default": 10,
+            "type": "int",
+            "description": "Request timeout in seconds"
+        },
+        "safe_mode": {
+            "default": True,
+            "type": "bool",
+            "description": "Enable safe search filtering"
+        }
+    }
+```
+
+**Supported Types:**
+- `"int"`: Rendered as QSpinBox (range 0-10000)
+- `"bool"`: Rendered as QCheckBox
+- `"str"`: Rendered as QLineEdit
+
+**Step 2: Accept Settings in execute()**
+
+Update your `execute()` method signature to accept an optional `settings` parameter:
+
+```python
+def execute(self, query: str, settings: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[Any]]:
+    """Execute the tool with the given query.
+    
+    Args:
+        query: The query string from the LLM
+        settings: Optional dict of settings from project config
+        
+    Returns:
+        Tuple of (result_text, extra_data)
+    """
+    # Read settings with fallback to defaults
+    max_results = 5
+    timeout = 10
+    safe_mode = True
+    
+    if settings:
+        max_results = settings.get("max_results", 5)
+        timeout = settings.get("timeout", 10)
+        safe_mode = settings.get("safe_mode", True)
+    
+    # Use settings in your implementation
+    results = self.perform_search(query, max_results=max_results, 
+                                   timeout=timeout, safe=safe_mode)
+    return (format_results(results), None)
+```
+
+**Step 3: Settings Persistence**
+
+Settings are automatically:
+- Displayed in Settings → Project Tools UI (indented under each tool)
+- Saved to `.inkwell/config.json` under `tool_settings`
+- Loaded from config when project opens
+- Passed to `tool.execute(query, settings=settings)` by ToolWorker
+
+**Complete Example:**
+
+```python
+from core.tool_base import Tool
+from typing import Dict, Any, Optional, Tuple
+
+class MyCustomTool(Tool):
+    @property
+    def name(self) -> str:
+        return "MY_TOOL"
+    
+    @property
+    def description(self) -> str:
+        return "My Custom Tool: :::TOOL:MY_TOOL:query:::"
+    
+    @property
+    def requires_libraries(self) -> list:
+        return ["requests"]
+    
+    def get_configurable_settings(self) -> Dict[str, Any]:
+        return {
+            "max_items": {"default": 10, "type": "int", "description": "Maximum items to fetch"},
+            "verbose": {"default": False, "type": "bool", "description": "Include detailed output"},
+        }
+    
+    def execute(self, query: str, settings: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[Any]]:
+        max_items = 10
+        verbose = False
+        
+        if settings:
+            max_items = settings.get("max_items", 10)
+            verbose = settings.get("verbose", False)
+        
+        # Your tool logic here using the settings
+        result = f"Fetched {max_items} items (verbose={verbose})"
+        return (result, None)
+
+# Register tool
+from core.tool_base import get_registry
+get_registry().register(MyCustomTool())
+```
+
+**Config File Format:**
+
+`.inkwell/config.json`:
+```json
+{
+  "enabled_tools": ["MY_TOOL", "WEB_READ", "SEARCH"],
+  "tool_settings": {
+    "MY_TOOL": {
+      "max_items": 20,
+      "verbose": true
+    },
+    "SEARCH": {
+      "max_results": 10
+    }
+  }
+}
+```
+
+**Best Practices:**
+- Always provide sensible defaults in the schema
+- Use descriptive setting names (no abbreviations)
+- Provide clear descriptions for users
+- Handle missing settings gracefully (fallback to default)
+- Keep settings simple (avoid nested structures)
+- Document valid ranges/values in description if applicable
+
 ### For Users
 - Available tools and their uses
 - How to enable/disable tools

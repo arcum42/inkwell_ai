@@ -387,6 +387,7 @@ class ImageViewerWidget(QWidget):
 class EditorWidget(QWidget):
     modification_changed = Signal(bool) # Emits when current tab's modification state changes
     batch_edit_requested = Signal(str, str) # path, content
+    tab_closed = Signal() # Emits when a tab is closed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -482,6 +483,8 @@ class EditorWidget(QWidget):
         if path in self.open_files:
             del self.open_files[path]
         self.tabs.removeTab(index)
+        # Emit signal so MainWindow can update project state
+        self.tab_closed.emit()
 
     def get_current_document(self):
         return self.tabs.currentWidget()

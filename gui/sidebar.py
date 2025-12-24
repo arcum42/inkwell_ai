@@ -1,7 +1,61 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QFileSystemModel, QHeaderView, QMenu, QInputDialog, QMessageBox, QFileDialog
-from PySide6.QtCore import QDir, Qt, QFileInfo, Signal
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QFileSystemModel, QHeaderView, QMenu, QInputDialog, QMessageBox, QFileDialog, QStyledItemDelegate
+from PySide6.QtCore import QDir, Qt, QFileInfo, Signal, QRect, QSize
+from PySide6.QtGui import QPainter, QColor, QBrush
 import os
 import shutil
+
+
+class IndexStatusDelegate(QStyledItemDelegate):
+    """Custom delegate to draw index status indicators next to files."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rag_engine = None
+    
+    def set_rag_engine(self, rag_engine):
+        self.rag_engine = rag_engine
+    
+    def paint(self, painter, option, index):
+        # Draw the default item
+        super().paint(painter, option, index)
+        
+        # Only draw status for files, not directories
+        model = index.model()
+        if model.isDir(index):
+            return
+        
+        file_path = model.filePath(index)
+        if not file_path.endswith(('.md', '.txt')):
+            return
+        
+        # Get status from RAG engine
+        if not self.rag_engine:
+            return
+        
+        status = self.rag_engine.get_file_index_status(file_path)
+        if not status:
+            return
+        
+        # Choose color based on status
+        if status == 'indexed':
+            color = QColor(0, 200, 0)  # Green
+        elif status == 'needs_reindex':
+            color = QColor(255, 165, 0)  # Orange
+        else:  # not_indexed
+            color = QColor(200, 0, 0)  # Red
+        
+        # Draw a small dot on the right side
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.NoPen)
+        
+        # Position dot on the right edge
+        dot_size = 6
+        dot_x = option.rect.right() - dot_size - 4
+        dot_y = option.rect.center().y() - (dot_size // 2)
+        painter.drawEllipse(dot_x, dot_y, dot_size, dot_size)
+        painter.restore()
 
 
 class ProjectTreeView(QTreeView):
@@ -93,6 +147,10 @@ class Sidebar(QWidget):
         self.tree.setModel(self.model)
         # self.tree.setRootIndex(self.model.index(QDir.rootPath()))
         
+        # Set up custom delegate for index status indicators
+        self.delegate = IndexStatusDelegate(self.tree)
+        self.tree.setItemDelegate(self.delegate)
+        
         # Hide extra columns (Size, Type, Date Modified) - keep only Name
         self.tree.hideColumn(1)
         self.tree.hideColumn(2)
@@ -108,6 +166,14 @@ class Sidebar(QWidget):
         self.tree.moved.connect(lambda old, new: self.file_moved.emit(old, new))
 
         self.layout.addWidget(self.tree)
+    
+    def set_rag_engine(self, rag_engine):
+        """Set the RAG engine for the delegate to check index status."""
+        self.delegate.set_rag_engine(rag_engine)
+    
+    def update_file_status(self):
+        """Force repaint to update file status indicators."""
+        self.tree.viewport().update()
 
     def set_root_path(self, path):
         """Updates the tree view to show the specified path."""

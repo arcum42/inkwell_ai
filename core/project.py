@@ -1,16 +1,83 @@
 import os
 import base64
+import json
 
 class ProjectManager:
     def __init__(self):
         self.root_path = None
+        self.tool_config = {}
 
     def open_project(self, path):
         """Sets the root path for the project."""
         if os.path.exists(path) and os.path.isdir(path):
             self.root_path = path
+            self._load_tool_config()
             return True
         return False
+
+    def _load_tool_config(self):
+        """Load project-level tool configuration from .inkwell/config.json if present."""
+        self.tool_config = {}
+        if not self.root_path:
+            return
+        config_path = os.path.join(self.root_path, '.inkwell', 'config.json')
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.tool_config = data
+        except Exception as e:
+            print(f"WARN: Failed to load tool config {config_path}: {e}")
+
+    def get_enabled_tools(self):
+        """Return a set of enabled tool names, or None to allow all tools."""
+        enabled = self.tool_config.get('enabled_tools') if isinstance(self.tool_config, dict) else None
+        if isinstance(enabled, list):
+            return set(enabled)
+        return None
+
+    def get_tool_settings(self, tool_name):
+        """Return per-tool settings dict, or empty dict."""
+        if not isinstance(self.tool_config, dict):
+            return {}
+        settings = self.tool_config.get('tool_settings', {})
+        if isinstance(settings, dict):
+            value = settings.get(tool_name, {})
+            return value if isinstance(value, dict) else {}
+        return {}
+
+    def set_enabled_tools(self, enabled_list):
+        """Update in-memory enabled tools list (None allows all)."""
+        if enabled_list is None:
+            self.tool_config['enabled_tools'] = None
+        elif isinstance(enabled_list, (list, set)):
+            self.tool_config.setdefault('enabled_tools', [])
+            self.tool_config['enabled_tools'] = list(enabled_list)
+        else:
+            # invalid input; ignore
+            pass
+
+    def set_tool_settings(self, settings_dict):
+        """Replace per-tool settings in memory with provided dict."""
+        if isinstance(settings_dict, dict):
+            self.tool_config['tool_settings'] = settings_dict
+
+    def save_tool_config(self):
+        """Persist current tool_config to .inkwell/config.json."""
+        if not self.root_path:
+            return False
+        config_dir = os.path.join(self.root_path, '.inkwell')
+        config_path = os.path.join(config_dir, 'config.json')
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(self.tool_config, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving tool config {config_path}: {e}")
+            return False
 
     def get_root_path(self):
         return self.root_path

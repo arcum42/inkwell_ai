@@ -1,14 +1,20 @@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QPushButton, QHBoxLayout
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QPushButton, QHBoxLayout, QCheckBox, QGroupBox, QSpinBox, QWidget, QLabel
 from PySide6.QtCore import QSettings
 from core.llm_provider import OllamaProvider
+from core.tool_base import get_registry
+# Ensure tools are loaded and registered
+import core.tools  # noqa: F401
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(500, 350)
+        self.resize(600, 500)
         
         self.settings = QSettings("InkwellAI", "InkwellAI")
+        self.registry = get_registry()
+        self.tool_checkboxes = {}
+        self.tool_settings_widgets = {}  # tool_name -> {setting_name -> widget}
         
         layout = QVBoxLayout(self)
         
@@ -58,6 +64,74 @@ class SettingsDialog(QDialog):
         self.form_layout.addRow("Default Image Folder:", self.default_image_folder)
         
         layout.addLayout(self.form_layout)
+        
+        # Project Tools Group (per-project)
+        tools_group = QGroupBox("Project Tools")
+        tools_layout = QVBoxLayout()
+        enabled_set = None
+        proj = getattr(parent, 'project_manager', None)
+        if proj and proj.get_root_path():
+            enabled_set = proj.get_enabled_tools()
+        
+        for tool in self.registry.get_all_tools():
+            # Tool checkbox
+            label = tool.name
+            if not tool.is_available():
+                label = f"{tool.name} (missing deps)"
+            cb = QCheckBox(label)
+            cb.setChecked(True if (enabled_set is None or tool.name in enabled_set) else False)
+            if not tool.is_available():
+                cb.setEnabled(False)
+            self.tool_checkboxes[tool.name] = cb
+            tools_layout.addWidget(cb)
+            
+            # Tool settings (indented)
+            settings_schema = tool.get_configurable_settings()
+            if settings_schema and proj and proj.get_root_path():
+                tool_settings_layout = QFormLayout()
+                tool_settings_widget = QWidget()
+                tool_settings_widget.setLayout(tool_settings_layout)
+                tool_settings_widget.setStyleSheet("margin-left: 20px;")
+                
+                self.tool_settings_widgets[tool.name] = {}
+                current_settings = proj.get_tool_settings(tool.name)
+                
+                for setting_name, schema in settings_schema.items():
+                    setting_type = schema.get("type", "str")
+                    default_val = schema.get("default")
+                    desc = schema.get("description", "")
+                    current_val = current_settings.get(setting_name, default_val)
+                    
+                    if setting_type == "int":
+                        widget = QSpinBox()
+                        widget.setRange(0, 10000)
+                        widget.setValue(current_val)
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    elif setting_type == "bool":
+                        widget = QCheckBox()
+                        widget.setChecked(current_val)
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    else:  # str
+                        widget = QLineEdit()
+                        widget.setText(str(current_val))
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    
+                    # Add description label if available
+                    if desc:
+                        desc_label = QLabel(f"<i>{desc}</i>")
+                        desc_label.setWordWrap(True)
+                        tool_settings_layout.addRow("", desc_label)
+                
+                tools_layout.addWidget(tool_settings_widget)
+        
+        tools_group.setLayout(tools_layout)
+        layout.addWidget(tools_group)
+        if not proj or not proj.get_root_path():
+            tools_group.setEnabled(False)
+            tools_group.setTitle("Project Tools (open a project to configure)")
         
         # Buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -146,4 +220,35 @@ class SettingsDialog(QDialog):
         if not folder_value:
             folder_value = "assets/images"
         self.settings.setValue("default_image_folder", folder_value)
+
+        # Persist project tool configuration if a project is open
+        proj = getattr(self.parent(), 'project_manager', None)
+        if proj and proj.get_root_path():
+            enabled = []
+            for name, cb in self.tool_checkboxes.items():
+                if cb.isEnabled() and cb.isChecked():
+                    enabled.append(name)
+            # If all available tools are checked, we allow None (all)
+            all_names = [t.name for t in self.registry.get_available_tools()]
+            if set(enabled) == set(all_names):
+                proj.set_enabled_tools(None)
+            else:
+                proj.set_enabled_tools(enabled)
+            
+            # Collect per-tool settings
+            tool_settings = {}
+            for tool_name, settings_widgets in self.tool_settings_widgets.items():
+                tool_config = {}
+                for setting_name, widget in settings_widgets.items():
+                    if isinstance(widget, QSpinBox):
+                        tool_config[setting_name] = widget.value()
+                    elif isinstance(widget, QCheckBox):
+                        tool_config[setting_name] = widget.isChecked()
+                    else:  # QLineEdit
+                        tool_config[setting_name] = widget.text()
+                if tool_config:
+                    tool_settings[tool_name] = tool_config
+            proj.set_tool_settings(tool_settings)
+            proj.save_tool_config()
+        
         self.accept()

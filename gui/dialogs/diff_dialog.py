@@ -52,6 +52,8 @@ class DiffDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Review Changes - {file_path}")
         self.resize(1200, 700)
+        self._old_text = old_content or ""
+        self._new_text = new_content or ""
         
         layout = QVBoxLayout(self)
         
@@ -60,6 +62,12 @@ class DiffDialog(QDialog):
             layout.addWidget(QLabel(f"Creating NEW file: {file_path}"))
         else:
             layout.addWidget(QLabel(f"Modifying file: {file_path}"))
+        
+        # Change summary (added/removed/changed lines)
+        add_count, del_count, chg_count = self._compute_diff_stats(self._old_text, self._new_text)
+        summary_label = QLabel(f"Changes: +{add_count} / -{del_count} / ~{chg_count}")
+        summary_label.setStyleSheet("color: #444; font-style: italic; margin-bottom: 6px;")
+        layout.addWidget(summary_label)
         
         # Main splitter: top = side-by-side, bottom = HTML diff
         main_splitter = QSplitter(Qt.Vertical)
@@ -80,8 +88,19 @@ class DiffDialog(QDialog):
         diff_view.setOpenExternalLinks(False)
         diff_view.setOpenLinks(False)
         diff_view.setStyleSheet("QTextBrowser { font-family: monospace; }")
-        diff_html = self._build_diff_html(old_content or "", new_content or "")
+        self._show_context = True
+        self._diff_view = diff_view
+        diff_html = self._build_diff_html(self._old_text, self._new_text, context=self._show_context)
         diff_view.setHtml(diff_html)
+        
+        # Diff controls
+        controls = QHBoxLayout()
+        toggle_full_btn = QPushButton("Show Full Diff")
+        toggle_full_btn.setCheckable(True)
+        toggle_full_btn.toggled.connect(lambda checked: self._toggle_diff_context(checked))
+        controls.addWidget(toggle_full_btn)
+        controls.addStretch()
+        layout.addLayout(controls)
         main_splitter.addWidget(diff_view)
         
         # Relative sizes: give more space to side-by-side
@@ -97,7 +116,7 @@ class DiffDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-    def _build_diff_html(self, old_text: str, new_text: str) -> str:
+    def _build_diff_html(self, old_text: str, new_text: str, context: bool = True) -> str:
         """Generate an HTML side-by-side diff table.
         Uses difflib.HtmlDiff for clear visual differences.
         """
@@ -108,7 +127,7 @@ class DiffDialog(QDialog):
             new_lines,
             fromdesc="Current",
             todesc="Proposed",
-            context=True,
+            context=context,
             numlines=2,
         )
         # Add minimal styling for readability
@@ -124,3 +143,22 @@ class DiffDialog(QDialog):
         </style>
         """
         return style + diff
+
+    def _compute_diff_stats(self, old_text: str, new_text: str):
+        """Compute counts of added, removed, and changed lines."""
+        add = del_ = chg = 0
+        differ = difflib.Differ()
+        for line in differ.compare(old_text.splitlines(), new_text.splitlines()):
+            if line.startswith('+ '):
+                add += 1
+            elif line.startswith('- '):
+                del_ += 1
+            elif line.startswith('? '):
+                chg += 1
+        return add, del_, chg
+
+    def _toggle_diff_context(self, show_full: bool):
+        """Toggle between context and full diff views."""
+        self._show_context = not show_full
+        html = self._build_diff_html(self._old_text, self._new_text, context=self._show_context)
+        self._diff_view.setHtml(html)

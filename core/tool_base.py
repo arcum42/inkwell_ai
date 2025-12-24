@@ -33,12 +33,27 @@ class Tool(ABC):
         """
         return []
     
+    def get_configurable_settings(self) -> Dict[str, Any]:
+        """Return dict of setting names to default values for this tool.
+        
+        Override this to define configurable settings. Format:
+        {
+            "setting_name": {"default": value, "type": "int"|"str"|"bool", "description": "..."},
+            ...
+        }
+        
+        Returns:
+            Dict of setting schemas
+        """
+        return {}
+    
     @abstractmethod
-    def execute(self, query: str) -> Tuple[str, Optional[Any]]:
+    def execute(self, query: str, settings: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[Any]]:
         """Execute the tool with the given query.
         
         Args:
             query: The query string from the LLM
+            settings: Optional dict of settings from project config
             
         Returns:
             Tuple of (result_text, extra_data)
@@ -104,13 +119,19 @@ class ToolRegistry:
         """
         return self._tools.get(name)
     
-    def get_available_tools(self) -> list:
+    def get_available_tools(self, enabled_names: Optional[set] = None) -> list:
         """Get list of available (usable) tools.
         
+        Args:
+            enabled_names: Optional set of tool names to allow. If None, all registered tools are considered.
+        
         Returns:
-            List of Tool instances that are currently available
+            List of Tool instances that are currently available and permitted
         """
-        return [t for t in self._tools.values() if t.is_available()]
+        tools = self._tools.values()
+        if enabled_names is not None:
+            tools = [t for t in tools if t.name in enabled_names]
+        return [t for t in tools if t.is_available()]
     
     def get_all_tools(self) -> list:
         """Get all registered tools regardless of availability.
@@ -120,13 +141,16 @@ class ToolRegistry:
         """
         return list(self._tools.values())
     
-    def get_tool_instructions(self) -> str:
+    def get_tool_instructions(self, enabled_names: Optional[set] = None) -> str:
         """Generate tool instructions for LLM context.
+        
+        Args:
+            enabled_names: Optional set of tool names permitted for this project
         
         Returns:
             Formatted string describing available tools and their usage
         """
-        tools = self.get_available_tools()
+        tools = self.get_available_tools(enabled_names)
         if not tools:
             return ""
         

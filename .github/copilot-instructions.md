@@ -8,6 +8,13 @@ Inkwell AI is a writer-focused workspace application built with Python and PySid
 - `gui/`: UI components (MainWindow, Editor, Chat, Sidebar, ImageGen, dialogs)
 - `workflows/`: ComfyUI JSON workflow templates
 
+**Environment:**
+- This application runs in a Python virtual environment located at `venv/` in the project root
+- **ALWAYS activate the venv before running or testing:** `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows)
+- **NEVER attempt to run the application without activating the venv first**
+- All dependencies are installed in the venv via `pip install -r requirements.txt`
+- The venv ensures isolated dependency management and prevents conflicts with system Python packages
+
 ## Python Coding Standards
 
 **Style:**
