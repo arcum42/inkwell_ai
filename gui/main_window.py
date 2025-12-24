@@ -368,11 +368,17 @@ class MainWindow(QMainWindow):
             system_prompt += f"\nCurrently Open File ({active_path}):\n{active_content}\n"
         
         # We need to pass the model to the worker/provider
+        # Show thinking indicator
+        self.chat.show_thinking()
+        
         self.worker = ChatWorker(provider, self.chat_history, model, context, system_prompt)
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
 
     def on_chat_response(self, response):
+        # Remove thinking indicator
+        self.chat.remove_thinking()
+        
         print(f"DEBUG: Raw AI Response:\n{response}")
         
         # Parse for :::UPDATE...::: blocks
@@ -446,23 +452,24 @@ class MainWindow(QMainWindow):
                 
                 dialog = DiffDialog(path, old_content, new_content, self)
                 if dialog.exec():
-                    # Apply
-                    if self.project_manager.save_file(path, new_content):
-                        self.statusBar().showMessage(f"Applied changes to {path}", 3000)
-                        QMessageBox.information(self, "Success", f"Changes applied to {path}")
-                        
-                        # Refresh editor if open, or open it if new
-                        if path in self.editor.open_files:
-                            doc_widget = self.editor.open_files[path]
-                            doc_widget.update_content(new_content)
-                        else:
-                            self.editor.open_file(path, new_content)
-                            
-                        # Update RAG
-                        if self.rag_engine:
-                            self.rag_engine.index_file(path, new_content)
-                    else:
-                        QMessageBox.warning(self, "Error", f"Failed to save {path}")
+                    # Apply to buffer (Undoable)
+                    # 1. Ensure file is open in editor
+                    if path not in self.editor.open_files:
+                        self.editor.open_file(path, old_content if old_content else "")
+                    
+                    # 2. Apply changes via undoable action
+                    doc_widget = self.editor.open_files[path]
+                    doc_widget.replace_content_undoable(new_content)
+                    
+                    self.statusBar().showMessage(f"Applied changes to buffer: {path}", 3000)
+                    QMessageBox.information(self, "Success", f"Changes applied to {path}\n(Not saved to disk yet)")
+                    
+                    # RAG update skipped for now until saved? 
+                    # Or should we update RAG with buffer content? 
+                    # Probably better to wait for save, as RAG usually reads from disk or memory structure.
+                    # If we really want to be correct, we should update RAG with memory content but that might start indexing unsaved stuff.
+                    # Let's clean up RAG index on save.
+
 
     def update_save_button_state(self, modified):
         self.save_act.setEnabled(modified)

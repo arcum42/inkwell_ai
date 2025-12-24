@@ -57,7 +57,7 @@ class RAGEngine:
             if ".inkwell_rag" in root:
                 continue
             for file in files:
-                if file.endswith(".md"):
+                if file.endswith((".md", ".txt")):
                     path = os.path.join(root, file)
                     try:
                         with open(path, 'r', encoding='utf-8') as f:

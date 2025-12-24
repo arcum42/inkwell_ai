@@ -339,6 +339,15 @@ class DocumentWidget(QWidget):
         if self.preview_btn.isChecked():
             self.show_preview()
 
+    def replace_content_undoable(self, content):
+        """Replaces content in an undoable way (select all -> paste)."""
+        cursor = self.editor.textCursor()
+        cursor.select(QTextCursor.Document)
+        cursor.insertText(content)
+        # This will trigger modificationChanged automatically via signal
+        if self.preview_btn.isChecked():
+            self.show_preview()
+
     def get_content(self):
         return self.editor.toPlainText()
 

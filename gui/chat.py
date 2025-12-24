@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QLineEdit, QPushButton, QHBoxLayout
 from PySide6.QtCore import Signal
+from PySide6 import QtGui # Need QtGui for cursors in thinking logic
 
 import markdown
 
@@ -61,3 +62,28 @@ class ChatWidget(QWidget):
         <hr>
         """
         self.history.append(formatted_msg)
+
+    def show_thinking(self):
+        """Appends a temporary 'Thinking...' message."""
+        # We use a special ID or marker we can find/remove? 
+        # Actually, since we append, it's at the end. We can just remember we added it.
+        # But QTextBrowser appends HTML. 
+        # A simple way is to append a block.
+        self.history.append('<div style="color: gray; font-style: italic;">AI is thinking...</div>')
+        self.history.moveCursor(QtGui.QTextCursor.End) # Ensure we scroll to bottom
+
+    def remove_thinking(self):
+        """Removes the last block (assumed to be the 'Thinking...' message)."""
+        # This is tricky with pure HTML append.
+        # We can use the cursor to select the last block and delete it.
+        cursor = self.history.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        
+        # Select the last block/line. 
+        # "AI is thinking..." might be its own block.
+        cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+        cursor.removeSelectedText()
+        
+        # Also remove the newline/block separator if needed
+        cursor.deletePreviousChar() 
+
