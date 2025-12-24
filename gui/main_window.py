@@ -19,7 +19,8 @@ import re
 import os
 import hashlib
 
-# ... (ChatWorker class remains unchanged) ...
+from gui.workers import ChatWorker
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -388,7 +389,7 @@ class MainWindow(QMainWindow):
             import uuid
             for path, content in matches:
                 path = path.strip()
-                content = content.strip()
+                content = content.strip().replace('\\n', '\n')
                 print(f"DEBUG: Parsed edit for {path}")
                 
                 edit_id = str(uuid.uuid4())
@@ -396,7 +397,7 @@ class MainWindow(QMainWindow):
                 
             def replace_match(match):
                 m_path = match.group(1).strip()
-                m_content = match.group(2).strip()
+                m_content = match.group(2).strip().replace('\\n', '\n')
                 m_id = str(uuid.uuid4())
                 self.pending_edits[m_id] = (m_path, m_content)
                 return f'<br><b><a href="edit:{m_id}">Review Changes for {m_path}</a></b><br>'
