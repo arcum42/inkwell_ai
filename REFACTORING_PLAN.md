@@ -433,16 +433,17 @@ core/orchestration/
   - [x] Create completion doc: `PHASE2C_COMPLETION_TOOLS.md`
   - [x] Runtime tests confirm registration and tool execution
 
-### Phase 3: UI Components (Weeks 4-5)
-- [ ] Refactor `gui/editor.py` into `gui/editors/` module
-  - Backup first: `cp gui/editor.py gui/editor.py.backup_v1`
-  - Separate editor types
-  - Extract formatting logic
-  - Maintain backward compatibility
-- [ ] Refactor `gui/workers.py` into `gui/workers/` module
-  - Backup first
-  - Organize workers by domain
-  - Consolidate base worker patterns
+### Phase 3: UI Components (Weeks 4-5) ✅ COMPLETE
+- [x] Refactor `gui/workers.py` into `gui/workers/` module ✅
+  - [x] Backup: `gui/workers.py.backup_pre_refactor_v1`
+  - [x] Split into tool_worker, chat_worker, batch_worker, index_worker
+  - [x] Backward-compatible wrapper (25 lines)
+  - [x] Import tests pass
+- [x] Refactor `gui/editor.py` into `gui/editors/` module ✅
+  - [x] Backup: `gui/editor.py.backup_pre_refactor_v1`
+  - [x] Split into dialogs, code_editor, document_viewer, image_viewer, editor_widget
+  - [x] Backward-compatible wrapper (23 lines)
+  - [x] Import tests pass
 
 ### Phase 4: Main Window (Weeks 6-8)
 - [ ] Refactor `gui/main_window.py` (LARGEST TASK)
@@ -610,7 +611,7 @@ ls -lh *.backup_pre_refactor_v1
 | `core/llm_provider.py` | 292→ | 🟡 MEDIUM | ✅ Complete | Low | Medium |
 | `gui/workers.py` | 263 | 🟡 MEDIUM | 📋 Not Started | Low | Low |
 
-**Progress:** Phase 2 Complete (3/3) | Phase 3: 0/2 | Phase 4: 0/1
+**Progress:** Phase 2 Complete (3/3) | Phase 3 Complete (2/2) | Phase 4: 0/1
 
 **Estimated Remaining Effort:** 2-3 weeks for UI components + main window refactoring
 

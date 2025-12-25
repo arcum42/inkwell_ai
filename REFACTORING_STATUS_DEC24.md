@@ -4,7 +4,7 @@
 
 **Phase 1: COMPLETE** ✅  
 **Phase 2: COMPLETE** ✅  
-**Phase 3: Not Started** 📋  
+**Phase 3: COMPLETE** ✅  
 **Phase 4: Not Started** 📋
 
 ---
@@ -39,8 +39,20 @@
 - ✅ Backward-compatible wrapper (21 lines)
 - ✅ Runtime tests confirm registration working
 
----
+### Phase 3A: Workers Refactor
+- ✅ `gui/workers.py` (265 lines) → `gui/workers/` package
+- ✅ Split into: tool_worker, chat_worker, batch_worker, index_worker
+- ✅ Backward-compatible wrapper (25 lines)
+- ✅ Import tests pass for both old and new paths
 
+### Phase 3B: Editor Refactor
+- ✅ `gui/editor.py` (605 lines) → `gui/editors/` package
+- ✅ Split into: dialogs, code_editor, document_viewer, image_viewer, editor_widget
+- ✅ Backward-compatible wrapper (23 lines)
+- ✅ Import tests pass for both old and new paths
+workers.py` | 265 | 25 (wrapper) | **91% reduction** |
+| `gui/editor.py` | 605 | 23 (wrapper) | **96% reduction** |
+| `gui/main_window.py` | 2,613 | 2,648 | +35 (tool wir
 ## Current State
 
 ### Line Counts After Refactoring
@@ -80,7 +92,25 @@ core/
 │   ├── image_gen_tool.py (ImageGenTool - for UI control)
 │   ├── util.py           (DDG + HTML helpers)
 │   └── registry.py       (Registration helpers)
-```
+gui/
+├── workers/
+│   ├── __init__.py
+│   ├── tool_worker.py    (ToolWorker)
+│   ├── chat_worker.py    (ChatWorker)
+│   ├── batch_worker.py   (BatchWorker)
+│   └── index_worker.py   (IndexWorker)
+├── editors/
+│   ├── __init__.py
+│   ├── dialogs.py        (LinkDialog)
+from gui.workers import ChatWorker
+from gui.editor import EditorWidget
+
+# New imports (direct from packages)
+from core.rag import RAGEngine
+from core.llm import OllamaProvider
+from core.tools import WebReader
+from gui.workers import ChatWorker
+from gui.editors import EditorWidget
 
 ### Backward Compatibility
 
@@ -103,29 +133,15 @@ from core.tools import WebReader
 
 ### Tool System Improvements
 - Added `ImageGenTool` to registry for UI control
-  - Allows enabling/disabling image generation via settings
-  - Conditionally includes `:::GENERATE_IMAGE:::` syntax in prompts
-- Improved tool instructions with explicit examples
-  - "Find an image of a cat" → `:::TOOL:IMAGE:cat:::`
-- Added debug logging for tool injection and parsing
-- Settings dialog now shows all known tools (not just registered)
-- Per-project tool enablement with settings persistence
+  - Allows4: Main Window (2-3 weeks)
 
-### Settings Integration
-- Project settings (`enabled_tools`) control registry
-- Main window re-registers tools on project open
-- Settings dialog re-registers tools after save
-- Tool instructions filtered by enabled set in chat worker
+**Critical: gui/main_window.py (2,648 lines)**
+- Extract menu creation → `gui/menubar/`
+- Extract orchestration → `core/orchestration/`
+- Create controllers for project, chat, editor domains
+- Reduce main_window to ~300 lines (UI layout + signal routing)
 
----
-
-## Next Steps
-
-### Phase 3: UI Components (2-3 weeks)
-
-**Priority 1: gui/editor.py (605 lines)**
-- Split into `gui/editors/` package
-- Separate: CodeEditor, DocumentViewer, ImageViewer
+This is the largest and most complex refactoring task remaining
 - Extract formatting logic to utilities
 - Maintain backward compatibility via wrapper
 
@@ -146,17 +162,19 @@ from core.tools import WebReader
 This is the largest and most complex refactoring task.
 
 ---
-
-## Testing Status
-
-### Verified Working
-- ✅ Import compatibility (old and new paths)
+ for RAG, LLM, Tools, Workers, Editor)
 - ✅ Tool registration and execution
 - ✅ Settings persistence for tool enablement
 - ✅ RAG indexing and search
 - ✅ LLM provider switching (Ollama/LM Studio)
 - ✅ Image tool triggering with improved instructions
+- ✅ Worker thread operations (Chat, Index, Tool, Batch)
+- ✅ Editor tab management and document editing
 
+### Needs Testing After Next Phase
+- Main window orchestration
+- Menu separation
+- Controller integ
 ### Needs Testing After Next Phase
 - UI widget separation (editor refactor)
 - Worker thread isolation
