@@ -83,6 +83,33 @@ class MenuBarManager:
         settings_action.triggered.connect(self.window.open_settings_dialog)
         settings_menu.addAction(settings_action)
         
+        settings_menu.addSeparator()
+        
+        # Spell-checking toggle
+        spell_check_action = QAction("Enable Spell Checking", self.window)
+        spell_check_action.setCheckable(True)
+        spell_check_action.setChecked(self.window.spell_checker.is_enabled())
+        spell_check_action.triggered.connect(self._toggle_spell_checking)
+        settings_menu.addAction(spell_check_action)
+        
+        # Manage custom dictionary
+        dictionary_action = QAction("Manage Custom Dictionary...", self.window)
+        dictionary_action.triggered.connect(self._open_dictionary_manager)
+        settings_menu.addAction(dictionary_action)
+    
+    def _toggle_spell_checking(self, checked):
+        """Toggle spell-checking on/off."""
+        self.window.spell_checker.set_enabled(checked)
+        self.window.settings.setValue("spell_check_enabled", checked)
+    
+    def _open_dictionary_manager(self):
+        """Open custom dictionary management dialog."""
+        # Import here to avoid circular imports
+        from gui.dialogs.dictionary_dialog import DictionaryDialog
+        
+        dialog = DictionaryDialog(self.window.spell_checker, self.window)
+        dialog.exec()
+        
     def _create_debug_menu(self):
         """Create Debug menu."""
         debug_menu = self.menu_bar.addMenu("Debug")

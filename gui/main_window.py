@@ -6,6 +6,7 @@ from gui.sidebar import Sidebar
 from core.project import ProjectManager
 from core.llm_provider import OllamaProvider, LMStudioProvider
 from core.rag_engine import RAGEngine
+from gui.spell_checker import InkwellSpellChecker
 
 from gui.dialogs.settings_dialog import SettingsDialog
 from gui.dialogs.diff_dialog import DiffDialog
@@ -52,6 +53,11 @@ class MainWindow(QMainWindow):
         self.rag_engine = None
         self._last_token_usage = None
         
+        # Initialize spell-checker (global, will update project_root when project opens)
+        self.spell_checker = InkwellSpellChecker()
+        spell_check_enabled = self.settings.value("spell_check_enabled", True, type=bool)
+        self.spell_checker.set_enabled(spell_check_enabled)
+        
         # Central Stack (Welcome vs Main Interface)
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -82,7 +88,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.content_splitter)
         
         # Editor Area
-        self.editor = EditorWidget()
+        self.editor = EditorWidget(spell_checker=self.spell_checker)
         self.editor.batch_edit_requested.connect(self.handle_batch_edit)
         self.editor.tab_closed.connect(self.save_project_state)
         self.content_splitter.addWidget(self.editor)

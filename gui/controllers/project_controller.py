@@ -59,6 +59,13 @@ class ProjectController:
             # Update Editor
             self.window.editor.set_project_path(folder_path)
             
+            # Update Spell Checker with project root
+            self.window.spell_checker = self.window.spell_checker.__class__(folder_path)
+            spell_check_enabled = self.settings.value("spell_check_enabled", True, type=bool)
+            self.window.spell_checker.set_enabled(spell_check_enabled)
+            # Update editor's spell-checker reference
+            self.window.editor.spell_checker = self.window.spell_checker
+            
             # Save to settings
             self.settings.setValue("last_project", folder_path)
             
