@@ -796,9 +796,11 @@ class MainWindow(QMainWindow):
         # Parse for :::TOOL:...::: blocks
         tool_pattern = r":::TOOL:(.*?):(.*?):::"
         tool_match = re.search(tool_pattern, response)
+        print(f"DEBUG: Checking for tools in response... Match found: {tool_match is not None}")
         if tool_match:
             tool_name = tool_match.group(1).strip()
             query = tool_match.group(2).strip()
+            print(f"DEBUG: Executing tool '{tool_name}' with query '{query}'")
             self.chat.append_message("System", f"<i>Running tool: {tool_name}...</i>")
             self.chat.show_thinking() # thinking again for tool
             

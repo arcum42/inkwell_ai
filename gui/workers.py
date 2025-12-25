@@ -115,6 +115,9 @@ class ChatWorker(QThread):
             tool_instructions = get_registry().get_tool_instructions(self.enabled_tools)
             if tool_instructions:
                 content += "\n\n" + tool_instructions
+                print(f"DEBUG: Added tool instructions to prompt (enabled_tools={self.enabled_tools})")
+            else:
+                print(f"DEBUG: No tool instructions available (enabled_tools={self.enabled_tools})")
             
             msg = {"role": last_msg['role'], "content": content}
             if self.images:
