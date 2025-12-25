@@ -1,27 +1,27 @@
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFileDialog, QMenuBar, QMenu, QStackedWidget, QMessageBox, QStyle, QInputDialog, QProgressDialog, QProgressBar
 from PySide6.QtGui import QAction, QIcon, QKeySequence
-from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication
+from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication, QSettings
+
 from gui.sidebar import Sidebar
 from core.project import ProjectManager
 from core.llm_provider import OllamaProvider, LMStudioProvider
-from PySide6.QtCore import QSettings
+from core.rag_engine import RAGEngine
 
 from gui.dialogs.settings_dialog import SettingsDialog
+from gui.dialogs.diff_dialog import DiffDialog
+from gui.dialogs.image_dialog import ImageSelectionDialog
 from gui.editor import EditorWidget, DocumentWidget, ImageViewerWidget
 from gui.chat import ChatWidget
 from gui.welcome import WelcomeWidget
 from gui.image_gen import ImageGenWidget
 
-from core.rag_engine import RAGEngine
+from gui.controllers import MenuBarManager, ProjectController, EditorController, ChatController
 
-from gui.dialogs.diff_dialog import DiffDialog
+from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
 import re
 import os
 import hashlib
 import difflib
-
-from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
-from gui.dialogs.image_dialog import ImageSelectionDialog
 import shutil
 from core.tools import register_default_tools
 from core.tools.registry import register_by_names
@@ -46,274 +46,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Inkwell AI")
         self.resize(1200, 800)
         
+        # Core state
         self.project_manager = ProjectManager()
         self.settings = QSettings("InkwellAI", "InkwellAI")
         self.rag_engine = None
-        self.pending_edits = {} # id -> (path, content)
-        self.index_worker = None
-        self.index_progress_state = None  # (current, total, file) for dashboard
         self._last_token_usage = None
-        self._raw_ai_responses = []  # Track raw AI responses before parsing
-        
-        # ... (Menu Bar setup) ...
-        # We need to initialize editor before connecting signals, but editor is in stack?
-        # Wait, editor is created in main_interface usually.
-        # Let's check where editor is created. It's usually part of main_interface.
-        # Ah, I need to see where self.editor is defined. It's likely in init_ui or similar.
-        # Looking at previous code, self.editor is used in lambdas.
-        # Let's assume it's initialized before toolbar.
-        
-        # Actually, looking at the file, I need to find where `self.editor` is assigned.
-        # It seems I missed where `self.editor` is created in `MainWindow`. 
-        # It's likely inside `init_ui` or `setup_ui` which might be called in `__init__`.
-        # Wait, `MainWindow` usually has `self.editor = EditorWidget()` somewhere.
-        # Let's look at the file content again.
-        
-        # I'll just add the connection after I find where editor is created.
-        # For now, let's add the method `update_save_button_state`.
-        
-        # Menu Bar
-        self.menu_bar = self.menuBar()
-        file_menu = self.menu_bar.addMenu("File")
-        
-        open_action = QAction("Open Project Folder", self)
-        open_action.triggered.connect(self.open_project_dialog)
-        file_menu.addAction(open_action)
-        
-        save_action = QAction("Save", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_current_file)
-        file_menu.addAction(save_action)
-        
-        close_project_action = QAction("Close Project", self)
-        close_project_action.triggered.connect(self.close_project)
-        file_menu.addAction(close_project_action)
-        
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Edit Menu
-        edit_menu = self.menu_bar.addMenu("Edit")
-        
-        undo_action = QAction("Undo", self)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.triggered.connect(lambda: self.editor.undo())
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction("Redo", self)
-        redo_action.setShortcut("Ctrl+Y")
-        redo_action.triggered.connect(lambda: self.editor.redo())
-        edit_menu.addAction(redo_action)
-        
-        edit_menu.addSeparator()
-        
-        cut_action = QAction("Cut", self)
-        cut_action.setShortcut("Ctrl+X")
-        cut_action.triggered.connect(lambda: self.editor.cut())
-        edit_menu.addAction(cut_action)
-        
-        copy_action = QAction("Copy", self)
-        copy_action.setShortcut("Ctrl+C")
-        copy_action.triggered.connect(lambda: self.editor.copy())
-        edit_menu.addAction(copy_action)
-        
-        paste_action = QAction("Paste", self)
-        paste_action.setShortcut("Ctrl+V")
-        paste_action.triggered.connect(lambda: self.editor.paste())
-        edit_menu.addAction(paste_action)
-        
-        # Settings Menu
-        settings_menu = self.menu_bar.addMenu("Settings")
-        settings_action = QAction("Preferences...", self)
-        settings_action.triggered.connect(self.open_settings_dialog)
-        settings_menu.addAction(settings_action)
-        
-        # Debug Menu
-        debug_menu = self.menu_bar.addMenu("Debug")
-        export_debug_action = QAction("Export Debug Log & Chat", self)
-        export_debug_action.triggered.connect(self.export_debug_log)
-        debug_menu.addAction(export_debug_action)
-        
-        # View Menu
-        view_menu = self.menu_bar.addMenu("View")
-        image_studio_action = QAction("Image Studio", self)
-        image_studio_action.triggered.connect(self.open_image_studio)
-        view_menu.addAction(image_studio_action)
-        
-        chat_history_action = QAction("Chat History...", self)
-        chat_history_action.triggered.connect(self.open_chat_history)
-        view_menu.addAction(chat_history_action)
-        
-        # Toolbar
-        self.toolbar = self.addToolBar("Main Toolbar")
-        self.toolbar.setMovable(False)
-        
-        # Standard Icons
-        style = self.style()
-        
-        # Save File
-        self.save_act = QAction(style.standardIcon(QStyle.SP_DriveFDIcon), "Save", self)
-        self.save_act.setStatusTip("Save current file")
-        self.save_act.triggered.connect(self.save_current_file)
-        self.save_act.setEnabled(False) # Disabled by default
-        self.toolbar.addAction(self.save_act)
-        
-        self.toolbar.addSeparator()
-
-        # New File
-        new_file_act = QAction(style.standardIcon(QStyle.SP_FileIcon), "New File", self)
-        new_file_act.setStatusTip("Create a new file")
-        new_file_act.triggered.connect(lambda: self.sidebar.create_new_file(self.sidebar.tree.currentIndex()))
-        self.toolbar.addAction(new_file_act)
-        
-        # New Folder
-        new_folder_act = QAction(style.standardIcon(QStyle.SP_DirIcon), "New Folder", self)
-        new_folder_act.setStatusTip("Create a new folder")
-        new_folder_act.triggered.connect(lambda: self.sidebar.create_new_folder(self.sidebar.tree.currentIndex()))
-        self.toolbar.addAction(new_folder_act)
-
-        # Rename
-        rename_act = QAction(QIcon.fromTheme("edit-rename"), "Rename", self)
-        if rename_act.icon().isNull():
-            rename_act.setIcon(style.standardIcon(QStyle.SP_FileDialogDetailedView))
-        rename_act.setStatusTip("Rename selected file/folder")
-        rename_act.triggered.connect(lambda: self.sidebar.rename_item(self.sidebar.tree.currentIndex()))
-        self.toolbar.addAction(rename_act)
-
-        # Move To
-        move_act = QAction(QIcon.fromTheme("transform-move"), "Move To…", self)
-        if move_act.icon().isNull():
-            move_act.setIcon(style.standardIcon(QStyle.SP_ArrowForward))
-        move_act.setStatusTip("Move selected file/folder")
-        move_act.triggered.connect(lambda: self.sidebar.move_item(self.sidebar.tree.currentIndex()))
-        self.toolbar.addAction(move_act)
-
-        # Undo File Change
-        file_undo_act = QAction(QIcon.fromTheme("edit-undo"), "Undo File Change", self)
-        if file_undo_act.icon().isNull():
-            file_undo_act.setIcon(style.standardIcon(QStyle.SP_ArrowBack))
-        file_undo_act.setStatusTip("Undo last file rename/move")
-        file_undo_act.setShortcut(QKeySequence("Ctrl+Alt+Z"))
-        file_undo_act.triggered.connect(self.undo_file_change)
-        self.toolbar.addAction(file_undo_act)
-
-        # Redo File Change
-        file_redo_act = QAction(QIcon.fromTheme("edit-redo"), "Redo File Change", self)
-        if file_redo_act.icon().isNull():
-            file_redo_act.setIcon(style.standardIcon(QStyle.SP_ArrowForward))
-        file_redo_act.setStatusTip("Redo last undone file rename/move")
-        file_redo_act.setShortcut(QKeySequence("Ctrl+Alt+Y"))
-        file_redo_act.triggered.connect(self.redo_file_change)
-        self.toolbar.addAction(file_redo_act)
-        
-        # Open Project
-        open_act = QAction(style.standardIcon(QStyle.SP_DirOpenIcon), "Open Project", self)
-        open_act.setStatusTip("Open a project folder")
-        open_act.triggered.connect(self.open_project_dialog)
-        self.toolbar.addAction(open_act)
-        
-        # Close Project
-        close_act = QAction(style.standardIcon(QStyle.SP_DialogCloseButton), "Close Project", self)
-        close_act.setStatusTip("Close current project")
-        close_act.triggered.connect(self.close_project)
-        self.toolbar.addAction(close_act)
-        
-        self.toolbar.addSeparator()
-        
-        # Cut
-        cut_act = QAction(QIcon.fromTheme("edit-cut"), "Cut", self)
-        cut_act.triggered.connect(lambda: self.editor.cut())
-        self.toolbar.addAction(cut_act)
-        
-        # Copy
-        copy_act = QAction(QIcon.fromTheme("edit-copy"), "Copy", self)
-        copy_act.triggered.connect(lambda: self.editor.copy())
-        self.toolbar.addAction(copy_act)
-        
-        # Paste
-        paste_act = QAction(QIcon.fromTheme("edit-paste"), "Paste", self)
-        paste_act.triggered.connect(lambda: self.editor.paste())
-        self.toolbar.addAction(paste_act)
-        
-        self.toolbar.addSeparator()
-        
-        # Undo
-        undo_act = QAction(style.standardIcon(QStyle.SP_ArrowBack), "Undo", self)
-        undo_act.triggered.connect(lambda: self.editor.undo())
-        self.toolbar.addAction(undo_act)
-        
-        # Redo
-        redo_act = QAction(style.standardIcon(QStyle.SP_ArrowForward), "Redo", self)
-        redo_act.triggered.connect(lambda: self.editor.redo())
-        self.toolbar.addAction(redo_act)
-        
-        self.toolbar.addSeparator()
-        
-        # Image Studio
-        img_act = QAction(style.standardIcon(QStyle.SP_DesktopIcon), "Image Studio", self)
-        img_act.setStatusTip("Open Image Studio")
-        img_act.triggered.connect(self.open_image_studio)
-        self.toolbar.addAction(img_act)
-        
-        # Settings
-        settings_act = QAction(style.standardIcon(QStyle.SP_FileDialogDetailedView), "Settings", self)
-        settings_act.triggered.connect(self.open_settings_dialog)
-        self.toolbar.addAction(settings_act)
-        
-        # Formatting Toolbar
-        self.addToolBarBreak() # Start new row
-        self.format_toolbar = self.addToolBar("Formatting")
-        self.format_toolbar.setMovable(False)
-        
-        # Bold
-        bold_act = QAction(QIcon.fromTheme("format-text-bold"), "Bold", self)
-        bold_act.triggered.connect(lambda: self.editor.format_bold())
-        self.format_toolbar.addAction(bold_act)
-        
-        # Italic
-        italic_act = QAction(QIcon.fromTheme("format-text-italic"), "Italic", self)
-        italic_act.triggered.connect(lambda: self.editor.format_italic())
-        self.format_toolbar.addAction(italic_act)
-        
-        # Code Block
-        code_act = QAction(QIcon.fromTheme("format-text-code"), "Code Block", self) 
-        if code_act.icon().isNull(): code_act.setText("Code Block")
-        code_act.triggered.connect(lambda: self.editor.format_code_block())
-        self.format_toolbar.addAction(code_act)
-        
-        # Quote
-        quote_act = QAction(QIcon.fromTheme("format-text-blockquote"), "Quote", self) # Try standard name
-        if quote_act.icon().isNull(): quote_act.setText("Quote")
-        quote_act.triggered.connect(lambda: self.editor.format_quote())
-        self.format_toolbar.addAction(quote_act)
-        
-        self.format_toolbar.addSeparator()
-        
-        # Headers
-        h1_act = QAction("H1", self)
-        h1_act.triggered.connect(lambda: self.editor.format_h1())
-        self.format_toolbar.addAction(h1_act)
-        
-        h2_act = QAction("H2", self)
-        h2_act.triggered.connect(lambda: self.editor.format_h2())
-        self.format_toolbar.addAction(h2_act)
-        
-        h3_act = QAction("H3", self)
-        h3_act.triggered.connect(lambda: self.editor.format_h3())
-        self.format_toolbar.addAction(h3_act)
-        
-        self.format_toolbar.addSeparator()
-        
-        # Link
-        link_act = QAction(QIcon.fromTheme("insert-link"), "Link", self)
-        link_act.triggered.connect(lambda: self.editor.insert_link())
-        self.format_toolbar.addAction(link_act)
-        
-        # Image
-        image_act = QAction(QIcon.fromTheme("insert-image"), "Image", self)
-        image_act.triggered.connect(lambda: self.editor.insert_image())
-        self.format_toolbar.addAction(image_act)
         
         # Central Stack (Welcome vs Main Interface)
         self.stack = QStackedWidget()
@@ -338,9 +75,6 @@ class MainWindow(QMainWindow):
         # Sidebar
         self.sidebar = Sidebar()
         self.sidebar.tree.doubleClicked.connect(self.on_file_double_clicked)
-        # Keep editor tabs in sync when files are renamed or moved from sidebar
-        self.sidebar.file_renamed.connect(self.on_file_renamed)
-        self.sidebar.file_moved.connect(self.on_file_moved)
         self.main_splitter.addWidget(self.sidebar)
         
         # Content Splitter (Editor vs Chat)
@@ -349,33 +83,47 @@ class MainWindow(QMainWindow):
         
         # Editor Area
         self.editor = EditorWidget()
-        self.editor.modification_changed.connect(self.update_save_button_state) # Connect signal
         self.editor.batch_edit_requested.connect(self.handle_batch_edit)
-        self.editor.tab_closed.connect(self.save_project_state) # Save state when tabs are closed
+        self.editor.tab_closed.connect(self.save_project_state)
         self.content_splitter.addWidget(self.editor)
         
         # Image Studio
         self.image_gen = ImageGenWidget(self.settings)
-        # self.editor.add_tab(self.image_gen, "Image Studio") # Don't open by default, let persistence handle it
         
         # Chat Interface
         self.chat = ChatWidget()
-        self.chat.message_sent.connect(self.handle_chat_message)
-        self.chat.link_clicked.connect(self.handle_chat_link)
-        self.chat.save_chat_requested.connect(self.handle_save_chat)
-        self.chat.copy_to_file_requested.connect(self.handle_copy_chat_to_file)
-        self.chat.message_deleted.connect(self.handle_message_deleted)
-        self.chat.message_edited.connect(self.handle_message_edited)
-        self.chat.regenerate_requested.connect(self.handle_regenerate)
-        self.chat.continue_requested.connect(self.handle_continue)
-        self.chat.new_chat_requested.connect(self.handle_new_chat)
         self.chat.provider_changed.connect(self.on_provider_changed)
         self.chat.model_changed.connect(self.on_model_changed)
         self.chat.refresh_models_requested.connect(self.on_refresh_models)
-        self.chat.context_level_changed.connect(self.on_context_level_changed)
-        # Status message when copying messages/chat
         self.chat.message_copied.connect(self.on_message_copied)
         self.content_splitter.addWidget(self.chat)
+
+        # Initialize controllers (after widgets are created)
+        self.editor_controller = EditorController(self)
+        self.project_controller = ProjectController(self)
+        self.chat_controller = ChatController(self)
+        self.menu_manager = MenuBarManager(self)
+        
+        # Create menus and toolbars via MenuBarManager
+        self.menu_manager.create_menus()
+        self.menu_manager.create_toolbar()
+        self.menu_manager.create_format_toolbar()
+        
+        # Connect controller signals
+        self.sidebar.file_renamed.connect(self.editor_controller.on_file_renamed)
+        self.sidebar.file_moved.connect(self.editor_controller.on_file_moved)
+        self.editor.modification_changed.connect(self.editor_controller.update_save_button_state)
+        
+        self.chat.message_sent.connect(self.chat_controller.handle_chat_message)
+        self.chat.link_clicked.connect(self.chat_controller.handle_chat_link)
+        self.chat.save_chat_requested.connect(self.handle_save_chat)
+        self.chat.copy_to_file_requested.connect(self.handle_copy_chat_to_file)
+        self.chat.message_deleted.connect(self.chat_controller.handle_message_deleted)
+        self.chat.message_edited.connect(self.chat_controller.handle_message_edited)
+        self.chat.regenerate_requested.connect(self.chat_controller.handle_regenerate)
+        self.chat.continue_requested.connect(self.chat_controller.handle_continue)
+        self.chat.new_chat_requested.connect(self.chat_controller.handle_new_chat)
+        self.chat.context_level_changed.connect(self.chat_controller.on_context_level_changed)
 
         # Initialize model controls
         self.update_model_controls()
@@ -389,30 +137,71 @@ class MainWindow(QMainWindow):
         # Start at Welcome
         self.stack.setCurrentWidget(self.welcome_widget)
         
-        self.chat_history = [] # List of {"role": "user/assistant", "content": "..."}
-        self.context_level = "visible"  # Default context level
-        # File operations history for undo/redo
-        self.file_ops_history = []  # list of {"type": "rename"|"move", "old": str, "new": str}
-        self.file_ops_redo = []     # stack for redo
-        
-        # Load Recent Projects for Welcome Screen
-        self.update_welcome_screen()
-
         # Token dashboard in status bar
         self.token_status = QLabel("Tokens: --/-- | Cache: -- | Index: idle")
         self.statusBar().addPermanentWidget(self.token_status)
         
+        # Load Recent Projects for Welcome Screen
+        self.project_controller.update_welcome_screen()
+
         # Auto-open last project
         last_project = self.settings.value("last_project")
         if last_project and os.path.exists(last_project):
-            self.open_project(last_project)
+            self.project_controller.open_project(last_project)
+
+    # ========== Delegation Methods (Controller Wrappers) ==========
+    # These methods delegate to controllers for backward compatibility
+    
+    # Project operations -> ProjectController
+    def open_project_dialog(self):
+        """Delegate to ProjectController."""
+        self.project_controller.open_project_dialog()
+    
+    def open_project(self, path):
+        """Delegate to ProjectController."""
+        self.project_controller.open_project(path)
+    
+    def close_project(self):
+        """Delegate to ProjectController."""
+        self.project_controller.close_project()
+    
+    def save_project_state(self):
+        """Delegate to ProjectController."""
+        self.project_controller.save_project_state()
+    
+    def restore_project_state(self):
+        """Delegate to ProjectController."""
+        self.project_controller.restore_project_state()
+    
+    # File operations -> EditorController
+    def on_file_double_clicked(self, index):
+        """Delegate to EditorController."""
+        self.editor_controller.on_file_double_clicked(index)
+    
+    def save_current_file(self):
+        """Delegate to EditorController."""
+        self.editor_controller.save_current_file()
+    
+    def undo_file_change(self):
+        """Delegate to EditorController."""
+        self.editor_controller.undo_file_change()
+    
+    def redo_file_change(self):
+        """Delegate to EditorController."""
+        self.editor_controller.redo_file_change()
+    
+    # Chat operations -> ChatController (commented out as most are already connected to controller)
+    # def handle_chat_message(self, message):
+    #     """Delegate to ChatController."""
+    #     self.chat_controller.handle_chat_message(message)
+    
+    def open_chat_history(self):
+        """Delegate to ChatController."""
+        self.chat_controller.open_chat_history()
 
     def update_welcome_screen(self):
-        recent_projects = self.settings.value("recent_projects", [])
-        # Ensure it's a list (QSettings might return something else if empty)
-        if not isinstance(recent_projects, list):
-            recent_projects = []
-        self.welcome_widget.set_recent_projects(recent_projects)
+        """Delegate to ProjectController."""
+        self.project_controller.update_welcome_screen()
 
     def update_model_controls(self):
         """Update model controls with current settings and available models."""
@@ -2030,16 +1819,9 @@ class MainWindow(QMainWindow):
         print("Indexing complete")
 
     def closeEvent(self, event):
-        # Immediately cancel and terminate indexing worker
-        if hasattr(self, 'index_worker') and self.index_worker is not None:
-            try:
-                self.index_worker.cancel()
-                # Force terminate to avoid destructor issues
-                if self.index_worker.isRunning():
-                    self.index_worker.terminate()
-            except Exception:
-                pass
-        # Force hard exit immediately bypassing all cleanup
+        """Handle application close event."""
+        self.project_controller.shutdown_on_close()
+        # Force hard exit to avoid destructor issues
         import os
         os._exit(0)
 

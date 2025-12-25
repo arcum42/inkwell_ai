@@ -561,17 +561,68 @@ class ChatController:
         """Regenerate the last assistant response."""
         if not self.chat_history:
             return
-            
-        # Remove last assistant message if present
-        if self.chat_history and self.chat_history[-1]["role"] == "assistant":
-            self.chat_history.pop()
-            self.window.chat.remove_last_message()
         
-        # Remove last user message and re-send it
-        if self.chat_history and self.chat_history[-1]["role"] == "user":
-            last_message = self.chat_history.pop()
-            self.window.chat.remove_last_message()
-            self.handle_chat_message(last_message["content"])
+        # Find the last assistant message
+        last_assistant_idx = None
+        last_user_idx = None
+        
+        for i in range(len(self.chat_history) - 1, -1, -1):
+            if self.chat_history[i]['role'] == 'assistant' and last_assistant_idx is None:
+                last_assistant_idx = i
+            elif self.chat_history[i]['role'] == 'user' and last_assistant_idx is not None and last_user_idx is None:
+                last_user_idx = i
+                break
+        
+        if last_assistant_idx is None:
+            QMessageBox.information(self.window, "Nothing to Regenerate", "No AI response found to regenerate.")
+            return
+        
+        # Remove the last assistant message
+        del self.chat_history[last_assistant_idx]
+        del self.window.chat.messages[last_assistant_idx]
+        self.window.chat.rebuild_chat_display()
+        
+        # Show thinking indicator
+        self.window.chat.show_thinking()
+        
+        # Resend the request
+        provider = self.window.get_llm_provider()
+        provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "Ollama":
+            model = self.settings.value("ollama_model", "llama3")
+        else:
+            model = self.settings.value("lm_studio_model", "llama3")
+        
+        # Get RAG context if available
+        context = []
+        if self.window.rag_engine and last_user_idx is not None:
+            query = self.chat_history[last_user_idx]['content']
+            context = self.window.rag_engine.query(query, n_results=5)
+        
+        # Build system prompt
+        system_prompt = self.window.project_manager.get_system_prompt(
+            self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant.")
+        )
+        
+        # Include project structure
+        if self.window.project_manager.root_path:
+            structure = self.window.project_manager.get_project_structure()
+            if len(structure) > 20000:
+                structure = structure[:20000] + "\n... (truncated)"
+            system_prompt += f"\n\nProject Structure:\n{structure}"
+        
+        enabled_tools = self.window.project_manager.get_enabled_tools()
+        self.worker = ChatWorker(
+            provider,
+            self.chat_history,
+            model,
+            context,
+            system_prompt,
+            images=None,
+            enabled_tools=enabled_tools,
+        )
+        self.worker.response_received.connect(self.on_chat_response)
+        self.worker.start()
 
     def handle_message_deleted(self, msg_index):
         """Handle message deletion from chat history.

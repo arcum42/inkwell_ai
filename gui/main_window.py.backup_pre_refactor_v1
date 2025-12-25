@@ -23,6 +23,8 @@ import difflib
 from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
 from gui.dialogs.image_dialog import ImageSelectionDialog
 import shutil
+from core.tools import register_default_tools
+from core.tools.registry import register_by_names
 
 
 def estimate_tokens(text: str) -> int:
@@ -538,8 +540,12 @@ class MainWindow(QMainWindow):
             self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant. Help users with their fiction, characters, worldbuilding, and storytelling.")
         )
         
+        # Check if image generation is enabled
+        enabled_tools = self.project_manager.get_enabled_tools()
+        image_gen_enabled = enabled_tools is None or "GENERATE_IMAGE" in enabled_tools
+        
         # Add comprehensive edit format instructions
-        system_prompt = base_system_prompt + (
+        edit_instructions = (
             "\n\n## Edit Formats\n"
             "Use PATCH for line-level edits or range replacements:\n"
             ":::PATCH path/to/file.md\n"
@@ -553,11 +559,18 @@ class MainWindow(QMainWindow):
             ":::UPDATE path/to/file.md\n"
             "Complete new file content...\n"
             ":::END:::\n"
-            "\n"
-            "Image generation:\n"
-            ":::GENERATE_IMAGE:::\n"
-            "Prompt: Description...\n"
-            ":::END:::\n"
+        )
+        
+        if image_gen_enabled:
+            edit_instructions += (
+                "\n"
+                "Image generation:\n"
+                ":::GENERATE_IMAGE:::\n"
+                "Prompt: Description...\n"
+                ":::END:::\n"
+            )
+        
+        edit_instructions += (
             "\n"
             "CRITICAL RULES:\n"
             "- ALWAYS use :::PATCH::: or :::UPDATE::: directives for file edits\n"
@@ -568,6 +581,8 @@ class MainWindow(QMainWindow):
             "- Explanations can come AFTER the directive block\n"
             "- When editing selections repeatedly, continue using :::PATCH::: format for each edit\n"
         )
+        
+        system_prompt = base_system_prompt + edit_instructions
             
         # Add Active File Context based on context level
         active_path, active_content = self.editor.get_current_file()
@@ -781,9 +796,11 @@ class MainWindow(QMainWindow):
         # Parse for :::TOOL:...::: blocks
         tool_pattern = r":::TOOL:(.*?):(.*?):::"
         tool_match = re.search(tool_pattern, response)
+        print(f"DEBUG: Checking for tools in response... Match found: {tool_match is not None}")
         if tool_match:
             tool_name = tool_match.group(1).strip()
             query = tool_match.group(2).strip()
+            print(f"DEBUG: Executing tool '{tool_name}' with query '{query}'")
             self.chat.append_message("System", f"<i>Running tool: {tool_name}...</i>")
             self.chat.show_thinking() # thinking again for tool
             
@@ -1875,6 +1892,15 @@ class MainWindow(QMainWindow):
 
     def open_project(self, folder_path):
         if self.project_manager.open_project(folder_path):
+            # Configure tool registry based on project settings
+            try:
+                enabled = self.project_manager.get_enabled_tools()
+                if enabled is None:
+                    register_default_tools()
+                else:
+                    register_by_names(enabled)
+            except Exception:
+                pass
             self.sidebar.set_root_path(folder_path)
             self.setWindowTitle(f"Inkwell AI - {folder_path}")
             self.stack.setCurrentWidget(self.main_interface)
@@ -2064,6 +2090,15 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
         if dialog.exec():
+            # Re-register tools based on updated project settings
+            try:
+                enabled = self.project_manager.get_enabled_tools()
+                if enabled is None:
+                    register_default_tools()
+                else:
+                    register_by_names(enabled)
+            except Exception:
+                pass
             # After settings are saved, refresh model controls
             self.update_model_controls()
 
