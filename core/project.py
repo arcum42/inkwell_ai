@@ -167,7 +167,7 @@ class ProjectManager:
             return "No project opened."
             
         structure = []
-        ignore_dirs = {'.git', '.idea', '__pycache__', 'venv', 'node_modules', '.gemini'}
+        ignore_dirs = {'.git', '.idea', '__pycache__', 'venv', 'node_modules', '.gemini', '.debug', '.inkwell_rag', '.venv'}
         
         for root, dirs, files in os.walk(self.root_path):
             # Modify dirs in-place to exclude ignored

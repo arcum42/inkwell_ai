@@ -23,16 +23,17 @@ class IndexWorker(QThread):
         
         # Collect all files to index with their sizes
         files_to_index = []
+        excluded_dirs = {".inkwell_rag", ".debug", ".git", "node_modules", "__pycache__", "venv", ".venv"}
+
         for root, dirs, files in os.walk(project_path):
-            if ".inkwell_rag" in root:
-                continue
-            if "/.debug" in root or root.endswith(os.sep + ".debug"):
+            # Prune excluded directories so os.walk does not descend into them
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+            if any(excluded in root for excluded in excluded_dirs):
                 continue
             for file in files:
                 if file.endswith((".md", ".txt")):
                     path = os.path.join(root, file)
-                    if "/.debug/" in path or path.endswith(os.sep + ".debug"):
-                        continue
                     try:
                         size = os.path.getsize(path)
                         files_to_index.append((path, size))

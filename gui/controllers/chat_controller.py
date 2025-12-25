@@ -549,7 +549,7 @@ class ChatController:
         
         # Clear chat history and UI
         self.chat_history = []
-        self.window.chat.clear_messages()
+        self.window.chat.clear_chat()
         self.pending_edits = {}
         
         # Clear selection info
@@ -690,8 +690,8 @@ class ChatController:
             QMessageBox.information(self.window, "No Project", "Open a project first to view chat history.")
             return
             
-        dialog = ChatHistoryDialog(self.window, self.window.project_manager.root_path, self.settings)
-        dialog.message_selected.connect(self.copy_message_to_current_chat)
+        dialog = ChatHistoryDialog(self.settings, self.window)
+        dialog.message_copy_requested.connect(self.copy_message_to_current_chat)
         dialog.exec()
     
     def copy_message_to_current_chat(self, message_content):
@@ -755,18 +755,32 @@ class ChatController:
                 except:
                     old_content = ""
                     
-                dialog = DiffDialog(self.window, path, old_content, new_content)
+                dialog = DiffDialog(path, old_content, new_content, parent=self.window)
                 if dialog.exec():
-                    # Apply the edit
+                    # Apply the edit - update editor only, don't save to disk
                     try:
-                        self.window.project_manager.write_file(path, new_content)
-                        self.window.statusBar().showMessage(f"Applied changes to {path}", 3000)
+                        # Resolve absolute path for lookup in open_files
+                        if not os.path.isabs(path) and self.window.project_manager.root_path:
+                            abs_path = os.path.join(self.window.project_manager.root_path, path)
+                        else:
+                            abs_path = path
                         
-                        # Update open tab if file is open
+                        # Check both relative and absolute path formats
+                        widget = None
                         if path in self.window.editor.open_files:
                             widget = self.window.editor.open_files[path]
-                            if isinstance(widget, DocumentWidget):
-                                widget.replace_content_undoable(new_content)
+                        elif abs_path in self.window.editor.open_files:
+                            widget = self.window.editor.open_files[abs_path]
+                        
+                        if widget and isinstance(widget, DocumentWidget):
+                            widget.replace_content_undoable(new_content)
+                            self.window.statusBar().showMessage(f"Applied changes to {path} - Press Ctrl+S to save", 3000)
+                        else:
+                            # File not open - save directly to disk
+                            saved = self.window.project_manager.save_file(path, new_content)
+                            if not saved:
+                                raise IOError("Save returned False")
+                            self.window.statusBar().showMessage(f"Applied changes to {path}", 3000)
                     except Exception as e:
                         QMessageBox.critical(self.window, "Error", f"Failed to apply changes: {e}")
                         
@@ -878,8 +892,8 @@ class ChatController:
         # Remove fenced blocks from response to avoid double-parsing
         response_no_fenced = re.sub(fenced_patch_pattern, '', response, flags=re.DOTALL | re.IGNORECASE)
         
-        # Bare PATCH blocks
-        patch_pattern = r":::PATCH\s*(.*?)\s*:::\s*\n(.*?)(?:\s*(?::::END:::|:::END|:::)|\s*$)"
+        # Bare PATCH blocks (allow optional closing ::: after path)
+        patch_pattern = r":::PATCH\s+([^\n]+?)\s*(?:::\s*)?\n(.*?)(?:\s*(?::::END:::|:::END|:::)|\s*$)"
         bare_matches = re.findall(patch_pattern, response_no_fenced, re.DOTALL)
         
         all_matches = list(fenced_matches) + list(bare_matches)
@@ -896,7 +910,7 @@ class ChatController:
         return unique
 
     def _process_patch_blocks(self, patch_matches, display_response, active_path, next_edit_id, non_text_extensions):
-        """Process all PATCH blocks and generate edit links."""
+        """Process PATCH blocks and append review links."""
         def _clean_patch_body(body: str) -> str:
             cleaned = body.strip()
             link_pattern = r'<br><b><a href="edit:[^"]+">.*?</a></b><br>'
@@ -906,13 +920,17 @@ class ChatController:
                 cleaned = cleaned.split(':::END:::')[0]
             return cleaned
 
+        links_html = []
+        seen = set()
+
         for m_path_raw, patch_body in patch_matches:
             if not m_path_raw:
                 continue
-                
-            m_path = self._normalize_edit_path(m_path_raw.strip(), active_path)
+
+            raw_path_clean = m_path_raw.strip()
+            m_path = self._normalize_edit_path(raw_path_clean, active_path)
             patch_body = _clean_patch_body(patch_body)
-            
+
             success, m_new_content = self._apply_patch_block(m_path, patch_body)
             if not success or m_new_content is None:
                 continue
@@ -921,13 +939,22 @@ class ChatController:
             if file_ext in non_text_extensions:
                 m_path = os.path.splitext(m_path)[0] + '.txt'
 
+            dedupe_key = (m_path, m_new_content)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
             m_id = next_edit_id()
             self.pending_edits[m_id] = (m_path, m_new_content)
-            
-            # Replace in display
-            link_html = f'<br><b><a href="edit:{m_id}">Review Changes for {m_path}</a></b><br>'
-            display_response = display_response.replace(f":::PATCH{m_path_raw}", link_html, 1)
-            
+            links_html.append(f'<br><b><a href="edit:{m_id}">Review Changes for {m_path}</a></b><br>')
+
+            # Strip original patch block from the displayed response to avoid clutter
+            block_pattern = re.compile(rf":::PATCH\s*{re.escape(raw_path_clean)}.*?:::END:::", re.DOTALL)
+            display_response = block_pattern.sub('', display_response, count=1)
+
+        if links_html:
+            display_response += "\n" + "".join(links_html)
+
         return display_response
 
     def _process_diff_blocks(self, processing_response, display_response, active_path, next_edit_id, non_text_extensions):

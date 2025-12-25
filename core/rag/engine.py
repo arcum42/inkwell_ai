@@ -420,9 +420,10 @@ class RAGEngine:
         self.query_cache.invalidate_all()
         
         excluded_dirs = {".inkwell_rag", ".debug", ".git", "node_modules", "__pycache__", "venv", ".venv"}
-        
+
         for root, dirs, files in os.walk(self.project_path):
-            # Skip excluded directories
+            # Prune excluded directories to avoid descending into them
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
             if any(excluded in root for excluded in excluded_dirs):
                 continue
             for file in files:
