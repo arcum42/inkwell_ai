@@ -717,9 +717,30 @@ class ChatController:
         
         Args:
             result_text: Tool result text
-            extra_data: Additional data from tool
+            extra_data: Additional data from tool (e.g., image results)
         """
         self.window.chat.remove_thinking()
+        
+        # Check if this is an image search result with image data
+        if extra_data and isinstance(extra_data, list) and len(extra_data) > 0:
+            # Check if it looks like image results (has 'image' or 'thumbnail' keys)
+            if isinstance(extra_data[0], dict) and ('image' in extra_data[0] or 'thumbnail' in extra_data[0]):
+                # Show image selection dialog
+                from gui.dialogs.image_dialog import ImageSelectionDialog
+                if self.window.project_manager.root_path:
+                    dialog = ImageSelectionDialog(extra_data, self.window.project_manager.root_path, self.window)
+                    if dialog.exec():
+                        saved_paths = dialog.saved_paths
+                        if saved_paths:
+                            result_text += f"\n\nSaved {len(saved_paths)} images:\n" + "\n".join(saved_paths)
+                        else:
+                            result_text += "\n\nNo images were saved."
+                    else:
+                        result_text += "\n\nImage selection cancelled."
+                else:
+                    result_text += "\n\nError: No project open to save images."
+        
+        # Continue chat with result
         self.continue_chat_with_tool_result(result_text)
         
     def continue_chat_with_tool_result(self, result):
