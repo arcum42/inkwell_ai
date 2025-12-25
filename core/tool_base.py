@@ -154,11 +154,21 @@ class ToolRegistry:
         if not tools:
             return ""
         
-        lines = ["You have access to the following tools:"]
+        lines = [
+            "## Available Tools",
+            "You have access to external tools. When the user asks you to search, find information, or retrieve images, use these tools:",
+            ""
+        ]
         for i, tool in enumerate(tools, 1):
             lines.append(f"{i}. {tool.description}")
             lines.append(f"   Usage: {tool.get_usage_pattern()}")
-        lines.append("Use these formats to request information or images. Stop generating after the tool command.")
+        lines.append("")
+        lines.append("IMPORTANT: To use a tool, output ONLY the tool command on its own line. Do not wrap it in code blocks or add extra text on the same line. Stop generating immediately after the tool command.")
+        lines.append("")
+        lines.append("Examples:")
+        lines.append("- User: 'Find an image of a cat' → You: :::TOOL:IMAGE:cat:::")
+        lines.append("- User: 'Search for python tutorials' → You: :::TOOL:SEARCH:python tutorials:::")
+        lines.append("- User: 'What is quantum computing' → You: :::TOOL:WIKI:quantum computing:::")
         return "\n".join(lines)
 
 
