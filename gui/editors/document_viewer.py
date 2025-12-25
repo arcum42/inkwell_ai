@@ -121,18 +121,40 @@ class DocumentWidget(QWidget):
         # Add Styling
         style = """
         <style>
-            body { font-family: sans-serif; }
-            code { background-color: #f0f0f0; padding: 2px 4px; border-radius: 4px; }
-            pre { background-color: #f0f0f0; padding: 10px; border-radius: 4px; }
-            blockquote { 
-                border-left: 4px solid #ccc; 
-                margin: 0; 
-                padding-left: 10px; 
-                color: #666; 
+            html, body {
+                font-family: sans-serif;
+                color: #ffffff !important;
+                background: #111;
+            }
+            p, li, ul, ol, table, td, th, blockquote { color: #ffffff !important; }
+            a { color: #7cc7ff; }
+            code {
+                background-color: #1f1f24;
+                color: #ffffff !important;
+                padding: 2px 4px;
+                border-radius: 4px;
+            }
+            pre {
+                background-color: #1f1f24;
+                color: #ffffff !important;
+                padding: 10px;
+                border-radius: 4px;
+                border: 1px solid #2e2e32;
+                overflow: auto;
+            }
+            pre code {
+                background: transparent;
+                color: #ffffff !important;
+            }
+            blockquote {
+                border-left: 4px solid #555;
+                margin: 0;
+                padding-left: 10px;
+                color: #e6e6e6;
             }
             table { border-collapse: collapse; width: 100%; }
-            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #f2f2f2; }
+            th, td { border: 1px solid #2e2e32; padding: 8px; text-align: left; color: #ffffff; }
+            th { background-color: #1a1a1f; color: #ffffff; }
         </style>
         """
         

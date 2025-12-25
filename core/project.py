@@ -43,6 +43,79 @@ class ProjectManager:
                 return active_name, prompt
         return None, None
 
+    def get_all_personas(self):
+        """Return dict of all personas {name: prompt}."""
+        if not isinstance(self.tool_config, dict):
+            return {}
+        personas = self.tool_config.get('personas', {})
+        return personas if isinstance(personas, dict) else {}
+
+    def add_persona(self, name: str, prompt: str):
+        """Add a new persona with the given name and prompt."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+        if not isinstance(prompt, str) or not prompt.strip():
+            return False
+        personas = self.tool_config.get('personas')
+        if not isinstance(personas, dict):
+            personas = {}
+        personas[name.strip()] = prompt.strip()
+        self.tool_config['personas'] = personas
+        # If this is the first persona, make it active
+        if 'active_persona' not in self.tool_config:
+            self.tool_config['active_persona'] = name.strip()
+        return True
+
+    def update_persona(self, old_name: str, new_name: str, prompt: str):
+        """Update an existing persona, optionally renaming it."""
+        if not isinstance(old_name, str) or not old_name.strip():
+            return False
+        if not isinstance(new_name, str) or not new_name.strip():
+            return False
+        if not isinstance(prompt, str) or not prompt.strip():
+            return False
+        personas = self.tool_config.get('personas')
+        if not isinstance(personas, dict) or old_name not in personas:
+            return False
+        
+        # Remove old entry
+        del personas[old_name]
+        # Add new entry
+        personas[new_name.strip()] = prompt.strip()
+        
+        # Update active_persona if it was the renamed one
+        if self.tool_config.get('active_persona') == old_name:
+            self.tool_config['active_persona'] = new_name.strip()
+        
+        return True
+
+    def remove_persona(self, name: str):
+        """Remove a persona by name."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+        personas = self.tool_config.get('personas')
+        if not isinstance(personas, dict) or name not in personas:
+            return False
+        
+        del personas[name]
+        
+        # If we removed the active persona, switch to another or None
+        if self.tool_config.get('active_persona') == name:
+            remaining = list(personas.keys())
+            self.tool_config['active_persona'] = remaining[0] if remaining else None
+        
+        return True
+
+    def select_active_persona(self, name: str):
+        """Set the active persona by name."""
+        if not isinstance(name, str):
+            return False
+        personas = self.tool_config.get('personas', {})
+        if not isinstance(personas, dict) or (name and name not in personas):
+            return False
+        self.tool_config['active_persona'] = name if name else None
+        return True
+
     def get_system_prompt(self, default_prompt: str) -> str:
         """Return project-specific system prompt, falling back to provided default."""
         _, prompt = self.get_active_persona()

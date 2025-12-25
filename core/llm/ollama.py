@@ -7,6 +7,10 @@ from .base import LLMProvider
 class OllamaProvider(LLMProvider):
     """Provider for local Ollama models."""
     
+    # Ollama library has streaming capability via chat(stream=True)
+    # Currently set to False - will enable in Phase 2 of streaming implementation
+    supports_streaming = False
+    
     def __init__(self, base_url="http://localhost:11434"):
         """Initialize Ollama provider.
         

@@ -7,6 +7,10 @@ from .base import LLMProvider
 class LMStudioProvider(LLMProvider):
     """Provider for LM Studio local models (OpenAI-compatible API)."""
     
+    # OpenAI-compatible API supports streaming via SSE
+    # Currently set to False - will enable in Phase 2 of streaming implementation
+    supports_streaming = False
+    
     def __init__(self, base_url="http://localhost:1234"):
         """Initialize LM Studio provider.
         

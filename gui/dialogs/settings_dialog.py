@@ -13,6 +13,10 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QTextEdit,
+    QTabWidget,
+    QListWidget,
+    QMessageBox,
+    QInputDialog,
 )
 from PySide6.QtCore import QSettings
 from core.tool_base import get_registry
@@ -24,80 +28,387 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(600, 500)
+        self.resize(700, 600)
         
         self.settings = QSettings("InkwellAI", "InkwellAI")
         self.registry = get_registry()
         self.tool_checkboxes = {}
         self.tool_settings_widgets = {}  # tool_name -> {setting_name -> widget}
-        proj = getattr(parent, 'project_manager', None)
+        self.proj = getattr(parent, 'project_manager', None)
         
         layout = QVBoxLayout(self)
         
-        self.form_layout = QFormLayout()
+        # Create tab widget
+        self.tabs = QTabWidget()
+        
+        # Create tabs
+        self.general_tab = self.create_general_tab()
+        self.personas_tab = self.create_personas_tab()
+        self.tools_tab = self.create_tools_tab()
+        self.editing_tab = self.create_editing_tab()
+        self.advanced_tab = self.create_advanced_tab()
+        
+        self.tabs.addTab(self.general_tab, "General")
+        self.tabs.addTab(self.personas_tab, "Personas")
+        self.tabs.addTab(self.tools_tab, "Tools")
+        self.tabs.addTab(self.editing_tab, "Editing")
+        self.tabs.addTab(self.advanced_tab, "Advanced")
+        
+        layout.addWidget(self.tabs)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.save_settings)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def create_general_tab(self):
+        """Create the General settings tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        form_layout = QFormLayout()
         
         # LLM Provider
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["Ollama", "LM Studio"])
+        self.provider_combo.addItems(["Ollama", "LM Studio", "LM Studio (Native SDK)"])
         current_provider = self.settings.value("llm_provider", "Ollama")
         self.provider_combo.setCurrentText(current_provider)
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
-        self.form_layout.addRow("LLM Provider:", self.provider_combo)
+        form_layout.addRow("LLM Provider:", self.provider_combo)
         
         # Ollama URL
         self.ollama_url = QLineEdit()
         self.ollama_url.setText(self.settings.value("ollama_url", "http://localhost:11434"))
-        self.form_layout.addRow("Ollama URL:", self.ollama_url)
+        self.ollama_row = form_layout.rowCount()
+        form_layout.addRow("Ollama URL:", self.ollama_url)
         
         # LM Studio URL
         self.lm_studio_url = QLineEdit()
         self.lm_studio_url.setText(self.settings.value("lm_studio_url", "http://localhost:1234"))
-        self.form_layout.addRow("LM Studio URL:", self.lm_studio_url)
+        self.lm_studio_row = form_layout.rowCount()
+        form_layout.addRow("LM Studio URL:", self.lm_studio_url)
+        
+        # LM Studio Native SDK URL
+        self.lm_studio_native_url = QLineEdit()
+        self.lm_studio_native_url.setText(self.settings.value("lm_studio_native_url", "localhost:1234"))
+        self.lm_native_row = form_layout.rowCount()
+        form_layout.addRow("LM Studio Native URL:", self.lm_studio_native_url)
         
         # ComfyUI URL
         self.comfy_url = QLineEdit()
         self.comfy_url.setText(self.settings.value("comfy_url", "http://127.0.0.1:8188"))
-        self.form_layout.addRow("ComfyUI URL:", self.comfy_url)
+        form_layout.addRow("ComfyUI URL:", self.comfy_url)
 
-        # Default Image Save Folder (relative to project)
+        # Default Image Save Folder
         self.default_image_folder = QLineEdit()
         self.default_image_folder.setPlaceholderText("assets/images")
         self.default_image_folder.setText(self.settings.value("default_image_folder", "assets/images"))
-        self.form_layout.addRow("Default Image Folder:", self.default_image_folder)
+        form_layout.addRow("Default Image Folder:", self.default_image_folder)
         
-        layout.addLayout(self.form_layout)
+        layout.addLayout(form_layout)
+        layout.addStretch()
+        
+        # Set URL visibility based on current provider
+        self.form_layout = form_layout
+        self.update_url_visibility(current_provider)
+        
+        return tab
 
-        # Persona (per-project)
-        persona_group = QGroupBox("Persona (per-project)")
-        persona_layout = QFormLayout()
-        self.persona_name = QLineEdit()
-        self.persona_name.setPlaceholderText("Default")
-        self.system_prompt_text = QTextEdit()
-        self.system_prompt_text.setPlaceholderText(
-            "Custom system prompt for this project/persona.\n\n"
+    def create_personas_tab(self):
+        """Create the Personas management tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        if not self.proj or not self.proj.get_root_path():
+            label = QLabel("Open a project to manage personas")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            return tab
+        
+        # Top section with list and buttons
+        top_layout = QHBoxLayout()
+        
+        # List of personas
+        self.persona_list = QListWidget()
+        self.persona_list.currentItemChanged.connect(self.on_persona_selected)
+        top_layout.addWidget(self.persona_list, 2)
+        
+        # Buttons
+        button_layout = QVBoxLayout()
+        self.add_persona_btn = QPushButton("Add")
+        self.add_persona_btn.clicked.connect(self.add_persona)
+        button_layout.addWidget(self.add_persona_btn)
+        
+        self.remove_persona_btn = QPushButton("Remove")
+        self.remove_persona_btn.clicked.connect(self.remove_persona)
+        button_layout.addWidget(self.remove_persona_btn)
+        
+        self.set_active_btn = QPushButton("Set Active")
+        self.set_active_btn.clicked.connect(self.set_active_persona)
+        button_layout.addWidget(self.set_active_btn)
+        
+        button_layout.addStretch()
+        top_layout.addLayout(button_layout)
+        
+        layout.addLayout(top_layout, 1)
+        
+        # Bottom section with persona editor
+        editor_group = QGroupBox("Persona Details")
+        editor_layout = QFormLayout()
+        
+        self.persona_name_edit = QLineEdit()
+        self.persona_name_edit.setPlaceholderText("Persona name")
+        editor_layout.addRow("Name:", self.persona_name_edit)
+        
+        self.persona_prompt_edit = QTextEdit()
+        self.persona_prompt_edit.setPlaceholderText(
+            "System prompt for this persona.\n\n"
             "Examples:\n"
             "• For fiction: 'You are a creative writing assistant specializing in fantasy fiction.'\n"
             "• For code: 'You are a Python expert who writes clean, documented code.'\n"
-            "• For technical writing: 'You are a technical documentation specialist.'\n\n"
-            "Leave blank to use the application default."
+            "• For technical writing: 'You are a technical documentation specialist.'"
         )
-
-        if proj and proj.get_root_path():
-            active_name, active_prompt = proj.get_active_persona()
-            if active_name:
-                self.persona_name.setText(active_name)
-            if active_prompt:
-                self.system_prompt_text.setPlainText(active_prompt)
-
-        persona_layout.addRow("Persona Name:", self.persona_name)
-        persona_layout.addRow("System Prompt:", self.system_prompt_text)
-        persona_group.setLayout(persona_layout)
-        layout.addWidget(persona_group)
-        if not proj or not proj.get_root_path():
-            persona_group.setEnabled(False)
-            persona_group.setTitle("Persona (open a project to configure)")
+        editor_layout.addRow("System Prompt:", self.persona_prompt_edit)
         
-        # Project Tools Group (per-project)
+        self.save_persona_btn = QPushButton("Save Changes")
+        self.save_persona_btn.clicked.connect(self.save_persona_changes)
+        editor_layout.addRow("", self.save_persona_btn)
+        
+        editor_group.setLayout(editor_layout)
+        layout.addWidget(editor_group, 2)
+        
+        # Load personas
+        self.load_personas()
+        
+        return tab
+
+    def create_tools_tab(self):
+        """Create the Tools configuration tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        if not self.proj or not self.proj.get_root_path():
+            label = QLabel("Open a project to configure tools")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            return tab
+        
+        tools_group = QGroupBox("Project Tools")
+        tools_layout = QVBoxLayout()
+        enabled_set = self.proj.get_enabled_tools()
+        
+        # Build list from all known tool classes
+        for tool_cls in AVAILABLE_TOOLS.values():
+            try:
+                tool = tool_cls()
+            except Exception:
+                continue
+            # Tool checkbox
+            label_text = tool.name
+            if not tool.is_available():
+                label_text = f"{tool.name} (missing deps)"
+            cb = QCheckBox(label_text)
+            cb.setChecked(True if (enabled_set is None or tool.name in enabled_set) else False)
+            if not tool.is_available():
+                cb.setEnabled(False)
+            self.tool_checkboxes[tool.name] = cb
+            tools_layout.addWidget(cb)
+            
+            # Tool settings (indented)
+            settings_schema = tool.get_configurable_settings()
+            if settings_schema:
+                tool_settings_layout = QFormLayout()
+                tool_settings_widget = QWidget()
+                tool_settings_widget.setLayout(tool_settings_layout)
+                tool_settings_widget.setStyleSheet("margin-left: 20px;")
+                
+                self.tool_settings_widgets[tool.name] = {}
+                current_settings = self.proj.get_tool_settings(tool.name)
+                
+                for setting_name, schema in settings_schema.items():
+                    setting_type = schema.get("type", "str")
+                    default_val = schema.get("default")
+                    desc = schema.get("description", "")
+                    current_val = current_settings.get(setting_name, default_val)
+                    
+                    if setting_type == "int":
+                        widget = QSpinBox()
+                        widget.setRange(0, 10000)
+                        widget.setValue(current_val)
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    elif setting_type == "bool":
+                        widget = QCheckBox()
+                        widget.setChecked(current_val)
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    else:  # str
+                        widget = QLineEdit()
+                        widget.setText(str(current_val))
+                        tool_settings_layout.addRow(f"{setting_name}:", widget)
+                        self.tool_settings_widgets[tool.name][setting_name] = widget
+                    
+                    # Add description label if available
+                    if desc:
+                        desc_label = QLabel(f"<i>{desc}</i>")
+                        desc_label.setWordWrap(True)
+                        tool_settings_layout.addRow("", desc_label)
+                
+                tools_layout.addWidget(tool_settings_widget)
+        
+        tools_group.setLayout(tools_layout)
+        layout.addWidget(tools_group)
+        layout.addStretch()
+        
+        return tab
+
+    def create_editing_tab(self):
+        """Create the Editing preferences tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        if not self.proj or not self.proj.get_root_path():
+            label = QLabel("Open a project to configure editing preferences")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            return tab
+        
+        editing_group = QGroupBox("Editing Preferences")
+        editing_layout = QFormLayout()
+        
+        self.apply_only_selection_cb = QCheckBox("Default to apply only within selection when available")
+        default_apply_only = False
+        try:
+            default_apply_only = bool(self.proj.get_editing_settings().get('apply_only_selection_default', False))
+        except Exception:
+            default_apply_only = False
+        self.apply_only_selection_cb.setChecked(default_apply_only)
+        editing_layout.addRow(self.apply_only_selection_cb)
+        
+        editing_group.setLayout(editing_layout)
+        layout.addWidget(editing_group)
+        layout.addStretch()
+        
+        return tab
+
+    def load_personas(self):
+        """Load personas into the list widget."""
+        self.persona_list.clear()
+        personas = self.proj.get_all_personas()
+        active_name, _ = self.proj.get_active_persona()
+        
+        for name in sorted(personas.keys()):
+            prefix = "★ " if name == active_name else ""
+            self.persona_list.addItem(f"{prefix}{name}")
+        
+        # Select the active persona if it exists
+        if active_name:
+            for i in range(self.persona_list.count()):
+                if self.persona_list.item(i).text().endswith(active_name):
+                    self.persona_list.setCurrentRow(i)
+                    break
+
+    def on_persona_selected(self, current, previous):
+        """Load the selected persona into the editor."""
+        if not current:
+            self.persona_name_edit.clear()
+            self.persona_prompt_edit.clear()
+            return
+        
+        # Remove the star prefix if present
+        name = current.text().lstrip("★ ")
+        personas = self.proj.get_all_personas()
+        
+        if name in personas:
+            self.persona_name_edit.setText(name)
+            self.persona_prompt_edit.setPlainText(personas[name])
+
+    def add_persona(self):
+        """Add a new persona."""
+        name, ok = QInputDialog.getText(self, "Add Persona", "Persona name:")
+        if not ok or not name.strip():
+            return
+        
+        name = name.strip()
+        personas = self.proj.get_all_personas()
+        
+        if name in personas:
+            QMessageBox.warning(self, "Duplicate Name", f"A persona named '{name}' already exists.")
+            return
+        
+        # Add with empty prompt
+        if self.proj.add_persona(name, " "):  # Space to satisfy validation
+            self.load_personas()
+            # Select the new persona
+            for i in range(self.persona_list.count()):
+                if self.persona_list.item(i).text().endswith(name):
+                    self.persona_list.setCurrentRow(i)
+                    break
+
+    def remove_persona(self):
+        """Remove the selected persona."""
+        current = self.persona_list.currentItem()
+        if not current:
+            QMessageBox.information(self, "No Selection", "Please select a persona to remove.")
+            return
+        
+        name = current.text().lstrip("★ ")
+        reply = QMessageBox.question(
+            self,
+            "Confirm Removal",
+            f"Are you sure you want to remove the persona '{name}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            if self.proj.remove_persona(name):
+                self.load_personas()
+                self.persona_name_edit.clear()
+                self.persona_prompt_edit.clear()
+
+    def set_active_persona(self):
+        """Set the selected persona as active."""
+        current = self.persona_list.currentItem()
+        if not current:
+            QMessageBox.information(self, "No Selection", "Please select a persona to activate.")
+            return
+        
+        name = current.text().lstrip("★ ")
+        if self.proj.select_active_persona(name):
+            self.load_personas()
+
+    def save_persona_changes(self):
+        """Save changes to the current persona."""
+        current = self.persona_list.currentItem()
+        if not current:
+            QMessageBox.information(self, "No Selection", "Please select a persona to edit.")
+            return
+        
+        old_name = current.text().lstrip("★ ")
+        new_name = self.persona_name_edit.text().strip()
+        prompt = self.persona_prompt_edit.toPlainText().strip()
+        
+        if not new_name:
+            QMessageBox.warning(self, "Invalid Name", "Persona name cannot be empty.")
+            return
+        
+        if not prompt:
+            QMessageBox.warning(self, "Invalid Prompt", "System prompt cannot be empty.")
+            return
+        
+        personas = self.proj.get_all_personas()
+        if new_name != old_name and new_name in personas:
+            QMessageBox.warning(self, "Duplicate Name", f"A persona named '{new_name}' already exists.")
+            return
+        
+        if self.proj.update_persona(old_name, new_name, prompt):
+            self.load_personas()
+            # Re-select the renamed persona
+            for i in range(self.persona_list.count()):
+                if self.persona_list.item(i).text().endswith(new_name):
+                    self.persona_list.setCurrentRow(i)
+                    break
         tools_group = QGroupBox("Project Tools")
         tools_layout = QVBoxLayout()
         enabled_set = None
@@ -164,48 +475,17 @@ class SettingsDialog(QDialog):
                 
                 tools_layout.addWidget(tool_settings_widget)
         
-        tools_group.setLayout(tools_layout)
-        layout.addWidget(tools_group)
-        if not proj or not proj.get_root_path():
-            tools_group.setEnabled(False)
-            tools_group.setTitle("Project Tools (open a project to configure)")
-
-        # Editing Preferences (per-project)
-        editing_group = QGroupBox("Editing Preferences (per-project)")
-        editing_layout = QFormLayout()
-        self.apply_only_selection_cb = QCheckBox("Default to apply only within selection when available")
-        default_apply_only = False
-        if proj and proj.get_root_path():
-            try:
-                default_apply_only = bool(proj.get_editing_settings().get('apply_only_selection_default', False))
-            except Exception:
-                default_apply_only = False
-        self.apply_only_selection_cb.setChecked(default_apply_only)
-        editing_layout.addRow(self.apply_only_selection_cb)
-        editing_group.setLayout(editing_layout)
-        layout.addWidget(editing_group)
-        if not proj or not proj.get_root_path():
-            editing_group.setEnabled(False)
-            editing_group.setTitle("Editing Preferences (open a project to configure)")
-        
-        # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.save_settings)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
-        # Set URL visibility based on current provider
-        self.update_url_visibility(current_provider)
-
     def update_url_visibility(self, provider_name: str):
         """Show only the URL field relevant to the current provider.
         ComfyUI URL is always visible.
         """
         ollama_label = self.form_layout.labelForField(self.ollama_url)
         lm_label = self.form_layout.labelForField(self.lm_studio_url)
+        lm_native_label = self.form_layout.labelForField(self.lm_studio_native_url)
 
         is_ollama = (provider_name == "Ollama")
         is_lm = (provider_name == "LM Studio")
+        is_lm_native = (provider_name == "LM Studio (Native SDK)")
 
         # Toggle visibility for Ollama URL
         self.ollama_url.setVisible(is_ollama)
@@ -216,7 +496,103 @@ class SettingsDialog(QDialog):
         self.lm_studio_url.setVisible(is_lm)
         if lm_label:
             lm_label.setVisible(is_lm)
+        
+        # Toggle visibility for LM Studio Native SDK URL
+        self.lm_studio_native_url.setVisible(is_lm_native)
+        if lm_native_label:
+            lm_native_label.setVisible(is_lm_native)
 
+    def create_advanced_tab(self):
+        """Create the Advanced settings tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Warning label
+        warning = QLabel(
+            "⚠️ Advanced Settings - For troubleshooting only.\n"
+            "Modifying these settings may affect LLM behavior."
+        )
+        warning.setStyleSheet("color: #ff6b6b; font-weight: bold; padding: 10px;")
+        layout.addWidget(warning)
+        
+        # Custom edit instructions
+        instructions_group = QGroupBox("Custom Edit Instructions")
+        instructions_layout = QVBoxLayout()
+        
+        instructions_label = QLabel(
+            "Customize the instructions sent to the LLM for file editing (PATCH/UPDATE formats).\n"
+            "Leave blank to use defaults. Changes apply immediately."
+        )
+        instructions_label.setWordWrap(True)
+        instructions_layout.addWidget(instructions_label)
+        
+        self.custom_edit_instructions = QTextEdit()
+        self.custom_edit_instructions.setPlaceholderText("Leave blank for default instructions...")
+        self.custom_edit_instructions.setMinimumHeight(250)
+        
+        # Load custom instructions or set to default
+        custom_text = self.settings.value("custom_edit_instructions", "")
+        if custom_text:
+            self.custom_edit_instructions.setPlainText(custom_text)
+        else:
+            # Show default instructions as placeholder
+            default_instructions = self._get_default_edit_instructions()
+            self.custom_edit_instructions.setPlaceholderText(default_instructions)
+        
+        instructions_layout.addWidget(self.custom_edit_instructions)
+        
+        # Reset button
+        reset_layout = QHBoxLayout()
+        reset_layout.addStretch()
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(self.reset_edit_instructions)
+        reset_layout.addWidget(reset_btn)
+        instructions_layout.addLayout(reset_layout)
+        
+        instructions_group.setLayout(instructions_layout)
+        layout.addWidget(instructions_group)
+        
+        layout.addStretch()
+        return tab
+    
+    def _get_default_edit_instructions(self):
+        """Get the default edit instructions text."""
+        return (
+            "\n\n## Edit Formats\n"
+            "Use PATCH for line-level edits or range replacements:\n"
+            ":::PATCH path/to/file.md\n"
+            "L42: old text => new text\n"
+            "L20-L23:\n"
+            "New content for lines 20-23...\n"
+            "Multiple lines here...\n"
+            ":::END:::\n"
+            "\n"
+            "Use UPDATE when replacing entire file or large sections:\n"
+            ":::UPDATE path/to/file.md\n"
+            "Complete new file content...\n"
+            ":::END:::\n"
+            "\n"
+            "Image generation:\n"
+            ":::GENERATE_IMAGE:::\n"
+            "Prompt: Description...\n"
+            ":::END:::\n"
+            "\n"
+            "CRITICAL RULES:\n"
+            "- ALWAYS use :::PATCH::: or :::UPDATE::: directives for file edits\n"
+            "- Output ONLY the directive blocks (:::PATCH...:::END:::)\n"
+            "- Do NOT wrap directives in code fences (no ```text or ```patch)\n"
+            "- Do NOT output edit: links or HTML anchors\n"
+            "- Do NOT include reminders or instructions in your response\n"
+            "- Do NOT include footnotes or citations unless specifically requested\n"
+            "- Explanations can come AFTER the directive block\n"
+            "- When editing selections repeatedly, continue using :::PATCH::: format for each edit\n"
+        )
+    
+    def reset_edit_instructions(self):
+        """Reset custom edit instructions to default."""
+        default = self._get_default_edit_instructions()
+        self.custom_edit_instructions.setPlainText(default)
+    
     def on_provider_changed(self, provider_name: str):
         # Adjust URL visibility
         self.update_url_visibility(provider_name)
@@ -225,21 +601,27 @@ class SettingsDialog(QDialog):
         self.settings.setValue("llm_provider", self.provider_combo.currentText())
         self.settings.setValue("ollama_url", self.ollama_url.text())
         self.settings.setValue("lm_studio_url", self.lm_studio_url.text())
+        self.settings.setValue("lm_studio_native_url", self.lm_studio_native_url.text())
         self.settings.setValue("comfy_url", self.comfy_url.text())
-        # Save default image folder (relative to project)
+        
+        # Save custom edit instructions
+        custom_instructions = self.custom_edit_instructions.toPlainText().strip()
+        self.settings.setValue("custom_edit_instructions", custom_instructions)
+        
+        # Save default image folder
         folder_value = self.default_image_folder.text().strip()
         if not folder_value:
             folder_value = "assets/images"
         self.settings.setValue("default_image_folder", folder_value)
 
-        # Persist project tool configuration if a project is open
-        proj = getattr(self.parent(), 'project_manager', None)
-        if proj and proj.get_root_path():
+        # Persist project-specific configuration if a project is open
+        if self.proj and self.proj.get_root_path():
+            # Save tool configuration
             enabled = []
             for name, cb in self.tool_checkboxes.items():
                 if cb.isEnabled() and cb.isChecked():
                     enabled.append(name)
-            # If all available tools are checked, we allow None (all)
+            # If all available tools are checked, allow None (all)
             available_names = []
             for cls in AVAILABLE_TOOLS.values():
                 try:
@@ -249,9 +631,9 @@ class SettingsDialog(QDialog):
                 if t.is_available():
                     available_names.append(t.name)
             if set(enabled) == set(available_names):
-                proj.set_enabled_tools(None)
+                self.proj.set_enabled_tools(None)
             else:
-                proj.set_enabled_tools(enabled)
+                self.proj.set_enabled_tools(enabled)
             
             # Collect per-tool settings
             tool_settings = {}
@@ -266,21 +648,17 @@ class SettingsDialog(QDialog):
                         tool_config[setting_name] = widget.text()
                 if tool_config:
                     tool_settings[tool_name] = tool_config
-            proj.set_tool_settings(tool_settings)
-
-            # Persist persona/system prompt
-            persona_name = self.persona_name.text().strip() or "Default"
-            persona_prompt = self.system_prompt_text.toPlainText().strip()
-            if persona_prompt:
-                proj.set_active_persona(persona_name, persona_prompt)
+            self.proj.set_tool_settings(tool_settings)
 
             # Persist editing preferences
             try:
-                proj.set_editing_settings({
+                self.proj.set_editing_settings({
                     'apply_only_selection_default': bool(self.apply_only_selection_cb.isChecked()),
                 })
             except Exception:
                 pass
-            proj.save_tool_config()
+            
+            # Save all project config (includes personas)
+            self.proj.save_tool_config()
         
         self.accept()

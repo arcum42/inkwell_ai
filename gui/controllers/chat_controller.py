@@ -50,6 +50,7 @@ class ChatController:
         self._last_selection_info = None  # Store selection context
         self._last_token_usage = None
         self.context_level = "visible"  # Default context level
+        self.chat_mode = "edit"  # Default mode: edit or ask
         self.worker = None
         self.tool_worker = None
         self.batch_worker = None
@@ -84,6 +85,7 @@ class ChatController:
         # Retrieve context if RAG is active and context level allows
         context = []
         mentioned_files = set()
+        included_files = set()  # Track all files already included in system prompt
         
         if self.context_level != "none" and self.window.rag_engine:
             print(f"DEBUG: Querying RAG for: {message}")
@@ -107,6 +109,7 @@ class ChatController:
                             rag_file_info.append(f"{source} ({tokens} tokens)")
                             token_usage += tokens
                             token_breakdown[f"RAG: {source}"] = token_breakdown.get(f"RAG: {source}", 0) + tokens
+                            included_files.add(source)  # Mark as included
                     except Exception:
                         pass
                 
@@ -124,24 +127,49 @@ class ChatController:
         enabled_tools = self.window.project_manager.get_enabled_tools()
         image_gen_enabled = enabled_tools is None or "GENERATE_IMAGE" in enabled_tools
         
-        # Add comprehensive edit format instructions
-        edit_instructions = self._get_edit_instructions(image_gen_enabled)
-        system_prompt = base_system_prompt + edit_instructions
+        # Add edit format instructions only in edit mode
+        system_prompt = base_system_prompt
+        if self.chat_mode == "edit":
+            edit_instructions = self._get_edit_instructions(image_gen_enabled)
+            system_prompt += edit_instructions
+        else:
+            # In ask mode, explicitly instruct to not generate patches/diffs
+            ask_mode_header = (
+                "\n\n" + "="*60 + "\n"
+                "CRITICAL: YOU ARE IN ASK MODE\n"
+                "="*60 + "\n"
+                "DO NOT generate file edits, patches, diffs, or any UPDATE/PATCH blocks.\n"
+                "DO NOT use :::UPDATE::: or :::PATCH::: markers.\n"
+                "When asked to rewrite, modify, or edit code/text:\n"
+                "  - Show the revised content as plain text in your response\n"
+                "  - Format it nicely with code blocks if appropriate\n"
+                "  - The user will manually copy what they need\n"
+                "You are a READ-ONLY assistant in this mode.\n"
+                "="*60 + "\n"
+            )
+            system_prompt += ask_mode_header
             
         # Add Active File Context based on context level
         active_path, active_content = self.window.editor.get_current_file()
         
-        # Include active file if not in "none" mode
-        if active_path and active_content and self.context_level != "none":
-            tokens = estimate_tokens(active_content)
-            print(f"DEBUG: Including active file in context: {active_path} ({tokens} tokens)")
-            system_prompt += f"\nCurrently Open File ({active_path}):\n{active_content}\n"
-            token_usage += tokens
-            token_breakdown[f"Active: {active_path}"] = tokens
+        # Include active file if not in "none" mode, not already in RAG context, and not excluded
+        if active_path and active_content and self.context_level != "none" and active_path not in included_files:
+            # Skip excluded directories like .debug
+            if self.window.rag_engine and self.window.rag_engine._should_exclude_file(active_path):
+                print(f"DEBUG: Skipping active file {active_path} (in excluded directory)")
+            else:
+                tokens = estimate_tokens(active_content)
+                print(f"DEBUG: Including active file in context: {active_path} ({tokens} tokens)")
+                system_prompt += f"\nCurrently Open File ({active_path}):\n{active_content}\n"
+                token_usage += tokens
+                token_breakdown[f"Active: {active_path}"] = tokens
+                included_files.add(active_path)  # Mark as included
+        elif active_path and active_path in included_files:
+            print(f"DEBUG: Skipping active file {active_path} (already in RAG context)")
         
         # Add other open tabs if context level is "all_open" or "full"
         if self.context_level in ("all_open", "full"):
-            open_files = self._collect_open_files(active_path, system_prompt, token_usage, token_breakdown)
+            open_files = self._collect_open_files(active_path, system_prompt, token_usage, token_breakdown, included_files)
             if open_files:
                 print(f"DEBUG: Including open tabs in context: {', '.join(open_files)}")
         
@@ -167,6 +195,21 @@ class ChatController:
             
         # Include selection info if present
         self._include_selection_info(active_path, token_usage, token_breakdown)
+        
+        # Add final reminder for ask mode
+        if self.chat_mode == "ask":
+            print("DEBUG: ASK MODE ACTIVE - Disabling tools and edit instructions")
+            system_prompt += (
+                "\n\n" + "="*60 + "\n"
+                "REMINDER: ASK MODE - No file modifications, no patches, no diffs.\n"
+                "Provide helpful information and plain text suggestions only.\n"
+                "="*60
+            )
+            # Disable all tools in ask mode
+            enabled_tools = set()  # Empty set disables all tools
+        
+        print(f"DEBUG: Enabled tools for this request: {enabled_tools}")
+        print(f"DEBUG: Chat mode: {self.chat_mode}")
              
         self.worker = ChatWorker(
             provider,
@@ -176,7 +219,12 @@ class ChatController:
             system_prompt,
             images=attached_images if is_vision else None,
             enabled_tools=enabled_tools,
+            mode=self.chat_mode,
         )
+        self.worker.response_thinking_start.connect(self.on_chat_thinking_start)
+        self.worker.response_thinking_chunk.connect(self.on_chat_thinking_chunk)
+        self.worker.response_thinking_done.connect(self.on_chat_thinking_done)
+        self.worker.response_chunk.connect(self.on_chat_chunk)
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
 
@@ -195,7 +243,17 @@ class ChatController:
         self.window._update_token_dashboard(token_usage, token_breakdown)
 
     def _get_edit_instructions(self, image_gen_enabled):
-        """Build edit format instructions."""
+        """Build edit format instructions.
+        
+        Uses custom instructions from settings if available, otherwise defaults.
+        """
+        # Check for custom instructions
+        custom_instructions = self.settings.value("custom_edit_instructions", "").strip()
+        if custom_instructions:
+            # User has provided custom instructions, use them
+            return custom_instructions
+        
+        # Use default instructions
         edit_instructions = (
             "\n\n## Edit Formats\n"
             "Use PATCH for line-level edits or range replacements:\n"
@@ -229,19 +287,29 @@ class ChatController:
             "- Do NOT wrap directives in code fences (no ```text or ```patch)\n"
             "- Do NOT output edit: links or HTML anchors\n"
             "- Do NOT include reminders or instructions in your response\n"
+            "- Do NOT include footnotes or citations unless specifically requested\n"
             "- Explanations can come AFTER the directive block\n"
             "- When editing selections repeatedly, continue using :::PATCH::: format for each edit\n"
         )
         return edit_instructions
     
-    def _collect_open_files(self, active_path, system_prompt, token_usage, token_breakdown):
-        """Collect content from open tabs."""
+    def _collect_open_files(self, active_path, system_prompt, token_usage, token_breakdown, included_files=None):
+        """Collect content from open tabs, skipping already-included files."""
+        if included_files is None:
+            included_files = set()
+        
         open_files = []
         for i in range(self.window.editor.tabs.count()):
             tab_widget = self.window.editor.tabs.widget(i)
             tab_path = tab_widget.property("file_path") if hasattr(tab_widget, 'property') else None
             
-            if tab_path and tab_path != active_path:
+            # Skip active file, already-included files, and excluded directories
+            if tab_path and tab_path != active_path and tab_path not in included_files:
+                # Skip excluded directories like .debug
+                if self.window.rag_engine and self.window.rag_engine._should_exclude_file(tab_path):
+                    print(f"DEBUG: Skipping open file {tab_path} (in excluded directory)")
+                    continue
+                
                 try:
                     content = self.window.project_manager.read_file(tab_path)
                     if content:
@@ -250,8 +318,12 @@ class ChatController:
                         system_prompt += f"\nOpen File ({tab_path}):\n{content}\n"
                         token_usage += tokens
                         token_breakdown[f"Open tab: {tab_path}"] = tokens
+                        included_files.add(tab_path)  # Mark as included
                 except Exception:
                     pass
+            elif tab_path and tab_path in included_files:
+                print(f"DEBUG: Skipping open file {tab_path} (already included in context)")
+        
         return open_files
     
     def _collect_images(self, is_vision, message, system_prompt):
@@ -325,6 +397,32 @@ class ChatController:
         except Exception as e:
             print(f"DEBUG: Failed to include selection info: {e}")
 
+    def on_chat_chunk(self, chunk):
+        """Handle streamed chunk from LLM (real-time token arrival).
+        
+        Args:
+            chunk: String chunk/token that just arrived from the LLM
+        """
+        # On first chunk, initialize streaming message block
+        if not self.window.chat.streaming_response:
+            self.window.chat.begin_streaming_response()
+        
+        # Append the chunk to the chat display as it arrives
+        # This shows tokens appearing in real-time without waiting for full response
+        self.window.chat.append_response_chunk(chunk)
+
+    def on_chat_thinking_start(self):
+        """Show thinking indicator when model enters reasoning phase."""
+        self.window.chat.begin_thinking()
+
+    def on_chat_thinking_chunk(self, chunk):
+        """Append thinking text without mixing into final answer."""
+        self.window.chat.append_thinking_chunk(chunk)
+
+    def on_chat_thinking_done(self):
+        """Hide thinking indicator when reasoning phase ends."""
+        self.window.chat.finish_thinking()
+    
     def on_chat_response(self, response):
         """Handle response from LLM.
         
@@ -343,7 +441,7 @@ class ChatController:
         if not self.is_response_complete(response):
             print("DEBUG: Response appears incomplete, auto-continuing...")
             self.chat_history.append({"role": "assistant", "content": response})
-            self.window.chat.append_message("Assistant", response)
+            self.window.chat.append_message("Assistant", response, raw_text=response)
             self.window.chat.append_message("System", "<i>Response incomplete, continuing...</i>")
             self.window.chat.show_thinking()
             self._continue_response()
@@ -352,11 +450,18 @@ class ChatController:
         # Add to chat history
         self.chat_history.append({"role": "assistant", "content": response})
         
+        # Save to history immediately so current conversation is viewable
+        self.save_current_chat_session()
+        
         # Parse and display response (this is very complex logic)
         display_response = self._parse_and_display_response(response)
         
-        # Display in chat
-        self.window.chat.append_message("Assistant", display_response)
+        # If we were streaming, replace the streamed content with parsed version
+        # Otherwise, add as a new message
+        if self.window.chat.streaming_response:
+            self.window.chat.finish_streaming_response(display_response, raw_text=response)
+        else:
+            self.window.chat.append_message("Assistant", display_response, raw_text=response)
         
     def is_response_complete(self, response: str) -> bool:
         """Check if response appears complete.
@@ -401,6 +506,11 @@ class ChatController:
         Returns:
             Formatted HTML response with edit links
         """
+        # In ask mode, skip all patch/edit parsing and just display as-is
+        if self.chat_mode == "ask":
+            print("DEBUG: ASK MODE - Skipping patch parsing, returning response as plain markdown")
+            return response
+        
         # Capture any edit:XYZ ids already present in the response
         provided_edit_ids = re.findall(r"edit:([0-9a-fA-F-]{6,})", response)
         seen_ids = set()
@@ -528,7 +638,12 @@ class ChatController:
             system_prompt,
             images=None,
             enabled_tools=self.window.project_manager.get_enabled_tools(),
+            mode=self.chat_mode,
         )
+        self.worker.response_thinking_start.connect(self.on_chat_thinking_start)
+        self.worker.response_thinking_chunk.connect(self.on_chat_thinking_chunk)
+        self.worker.response_thinking_done.connect(self.on_chat_thinking_done)
+        self.worker.response_chunk.connect(self.on_chat_chunk)
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
         self.window._update_token_dashboard()
@@ -627,7 +742,12 @@ class ChatController:
             system_prompt,
             images=None,
             enabled_tools=enabled_tools,
+            mode=self.chat_mode,
         )
+        self.worker.response_thinking_start.connect(self.on_chat_thinking_start)
+        self.worker.response_thinking_chunk.connect(self.on_chat_thinking_chunk)
+        self.worker.response_thinking_done.connect(self.on_chat_thinking_done)
+        self.worker.response_chunk.connect(self.on_chat_chunk)
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.start()
 
@@ -653,10 +773,12 @@ class ChatController:
     def save_current_chat_session(self):
         """Save current chat session to history."""
         if not self.chat_history:
+            print("DEBUG: No chat history to save")
             return
             
         project_path = self.window.project_manager.root_path
         if not project_path:
+            print("DEBUG: No project path, cannot save chat history")
             return
             
         key = hashlib.md5(project_path.encode()).hexdigest()
@@ -669,6 +791,8 @@ class ChatController:
             "timestamp": timestamp,
             "messages": self.chat_history
         }
+        
+        print(f"DEBUG: Saving chat session with {len(self.chat_history)} messages to key: chat_history/{key}")
         
         # Get existing sessions
         sessions_key = f"chat_history/{key}"
@@ -683,14 +807,17 @@ class ChatController:
         
         self.settings.setValue(sessions_key, existing)
         self.settings.sync()
+        
+        print(f"DEBUG: Chat session saved. Total sessions for this project: {len(existing)}")
 
     def open_chat_history(self):
         """Open chat history dialog."""
         if not self.window.project_manager.root_path:
             QMessageBox.information(self.window, "No Project", "Open a project first to view chat history.")
             return
-            
-        dialog = ChatHistoryDialog(self.settings, self.window)
+        
+        project_path = self.window.project_manager.root_path
+        dialog = ChatHistoryDialog(self.settings, self.window, project_path)
         dialog.message_copy_requested.connect(self.copy_message_to_current_chat)
         dialog.exec()
     
@@ -700,7 +827,7 @@ class ChatController:
         Args:
             message_content: Message content to copy
         """
-        self.window.chat.input.setPlainText(message_content)
+        self.window.chat.input_field.setPlainText(message_content)
         self.window.statusBar().showMessage("Message copied to input", 2000)
 
     def on_context_level_changed(self, level):
@@ -711,6 +838,15 @@ class ChatController:
         """
         self.context_level = level
         print(f"DEBUG: Context level changed to: {level}")
+    
+    def on_mode_changed(self, mode):
+        """Handle chat mode change.
+        
+        Args:
+            mode: New mode (ask or edit)
+        """
+        self.chat_mode = mode
+        print(f"DEBUG: Chat mode changed to: {mode}")
 
     def on_tool_finished(self, result_text, extra_data):
         """Handle tool execution completion.
@@ -1051,6 +1187,32 @@ class ChatController:
         
         return re.sub(r'<br><b><a href="edit:([^"]+)">.*?</a></b><br>', check_link, html)
 
+    def _clean_patch_body(self, patch_body: str) -> str:
+        """Clean patch body by removing citations and footnote markers.
+        
+        Removes:
+        - **Citations:** section and everything after it
+        - Footnote references like [^1], [^2], etc.
+        
+        Args:
+            patch_body: Raw patch content from LLM
+            
+        Returns:
+            Cleaned patch body
+        """
+        # Remove Citations section (everything from **Citations:** onwards)
+        citations_pattern = r'\*\*Citations:\*\*.*$'
+        patch_body = re.sub(citations_pattern, '', patch_body, flags=re.DOTALL | re.MULTILINE)
+        
+        # Remove footnote markers like [^1], [^2], [^3], etc.
+        footnote_pattern = r'\[\^\d+\]'
+        patch_body = re.sub(footnote_pattern, '', patch_body)
+        
+        # Clean up any trailing whitespace left behind
+        patch_body = patch_body.rstrip()
+        
+        return patch_body
+    
     def _apply_patch_block(self, file_path: str, patch_body: str) -> tuple[bool, str | None]:
         """Apply PATCH block to file content.
         
@@ -1060,6 +1222,9 @@ class ChatController:
         
         Returns (success, new_content)
         """
+        # Clean up patch body: remove citations section and footnote markers
+        patch_body = self._clean_patch_body(patch_body)
+        
         try:
             current = self.window.project_manager.read_file(file_path)
         except Exception as e:
@@ -1130,15 +1295,37 @@ class ChatController:
                     applied_any = True
                 continue
             
-            # Simple replacement: L42: new text
-            m2 = re.match(r"L(\d+):\s*(.+)", line)
+            # Simple replacement/insertion: L42: new text (can span multiple lines)
+            m2 = re.match(r"L(\d+):\s*(.*)", line)
             if m2:
                 line_no = int(m2.group(1))
-                new_text = m2.group(2).strip()
+                first_line = m2.group(2).strip()
                 
-                if 1 <= line_no <= len(lines):
-                    lines[line_no - 1] = new_text
+                # Collect all subsequent non-directive lines as part of this insertion
+                new_lines = []
+                if first_line:
+                    new_lines.append(first_line)
+                
+                # Capture subsequent lines until we hit another L##: directive or end
+                while i < len(raw_lines):
+                    peek = raw_lines[i]
+                    # Stop if we hit another line directive
+                    if re.match(r"\s*L\d+:", peek):
+                        break
+                    # Stop if we hit a range directive
+                    if re.match(r"\s*L\d+\s*-\s*L\d+:", peek):
+                        break
+                    new_lines.append(peek.rstrip())
+                    i += 1
+                
+                # Insert at line_no (this inserts before the line, pushing existing content down)
+                if 1 <= line_no <= len(lines) + 1:
+                    # Insert the new content at the specified line
+                    before = lines[:line_no - 1]
+                    after = lines[line_no - 1:]
+                    lines = before + new_lines + after
                     applied_any = True
+                    continue
 
         if not applied_any:
             return False, None

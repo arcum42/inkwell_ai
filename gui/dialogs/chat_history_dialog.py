@@ -11,9 +11,10 @@ class ChatHistoryDialog(QDialog):
     
     message_copy_requested = Signal(str)  # Emits message content to copy
     
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, project_path=None):
         super().__init__(parent)
         self.settings = settings
+        self.project_path = project_path
         self.setWindowTitle("Chat History")
         self.resize(900, 600)
         
@@ -107,10 +108,22 @@ class ChatHistoryDialog(QDialog):
         self.sessions_list.clear()
         self.chat_display.clear()
         
+        # Generate project-specific key
+        import hashlib
+        if self.project_path:
+            key = hashlib.md5(self.project_path.encode()).hexdigest()
+            sessions_key = f"chat_history/{key}"
+        else:
+            sessions_key = "chat_history"  # Fallback for old format
+        
+        print(f"DEBUG: Loading chat history from key: {sessions_key}")
+        
         # Get stored chat sessions
-        chat_sessions = self.settings.value("chat_history", [])
+        chat_sessions = self.settings.value(sessions_key, [])
         if not isinstance(chat_sessions, list):
             chat_sessions = []
+        
+        print(f"DEBUG: Found {len(chat_sessions)} chat sessions")
         
         self.chat_sessions = chat_sessions
         
@@ -194,4 +207,12 @@ class ChatHistoryDialog(QDialog):
     
     def save_chat_history(self):
         """Save chat sessions to settings."""
-        self.settings.setValue("chat_history", self.chat_sessions)
+        # Generate project-specific key
+        import hashlib
+        if self.project_path:
+            key = hashlib.md5(self.project_path.encode()).hexdigest()
+            sessions_key = f"chat_history/{key}"
+        else:
+            sessions_key = "chat_history"
+        
+        self.settings.setValue(sessions_key, self.chat_sessions)

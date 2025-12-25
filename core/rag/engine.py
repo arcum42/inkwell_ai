@@ -22,6 +22,9 @@ FILE_RECENCY_WEIGHT = 0.15
 RECENCY_FULL_SECONDS = 6 * 3600
 RECENCY_ZERO_SECONDS = 30 * 24 * 3600
 
+# Directories to exclude from indexing and querying
+EXCLUDED_DIRS = {".inkwell_rag", ".debug", ".git", "node_modules", "__pycache__", "venv", ".venv"}
+
 
 class RAGEngine:
     def __init__(self, project_path):
@@ -56,6 +59,26 @@ class RAGEngine:
         # Track recency for context prioritization
         self._file_access_times = {}  # source -> timestamp of last query result inclusion
 
+    def _should_exclude_file(self, file_path: str) -> bool:
+        """Check if a file path should be excluded from RAG.
+        
+        Args:
+            file_path: Absolute or relative file path to check
+            
+        Returns:
+            True if file should be excluded (e.g., in .debug folder)
+        """
+        # Normalize path separators
+        normalized_path = file_path.replace('\\', '/')
+        
+        # Check if any excluded directory appears in the path
+        path_parts = normalized_path.split('/')
+        for part in path_parts:
+            if part in EXCLUDED_DIRS:
+                return True
+        
+        return False
+    
     def _get_file_recency_score(self, file_path: str, current_time: Optional[float] = None) -> float:
         """Return a 0-1 freshness score based on file modification time."""
         if current_time is None:
@@ -186,10 +209,22 @@ class RAGEngine:
         if not use_hybrid or not self._all_chunks:
             results = self.collection.query(
                 query_texts=[query_text],
-                n_results=n_results
+                n_results=n_results * 2  # Get more to account for filtering
             )
-            result_docs = results['documents'][0] if results['documents'] else []
-            result_metas = results['metadatas'][0] if results['metadatas'] else []
+            result_docs_raw = results['documents'][0] if results['documents'] else []
+            result_metas_raw = results['metadatas'][0] if results['metadatas'] else []
+            
+            # Filter out excluded directories (e.g., .debug)
+            result_docs = []
+            result_metas = []
+            for doc, meta in zip(result_docs_raw, result_metas_raw):
+                source = meta.get('source', 'unknown')
+                if not self._should_exclude_file(source):
+                    result_docs.append(doc)
+                    result_metas.append(meta)
+                    if len(result_docs) >= n_results:
+                        break
+            
             result_sources = [meta.get('source', 'unknown') for meta in result_metas]
 
             if include_metadata:
@@ -272,7 +307,7 @@ class RAGEngine:
             remaining_ids = [doc_id for doc_id, _ in sorted_results[n_results:]]
             selected_ids.extend(remaining_ids[:MIN_HYBRID_RESULTS - len(selected_ids)])
         
-        # 6. Build final result list in score order
+        # 6. Build final result list in score order, filtering excluded directories
         result_docs = []
         result_sources = []
         result_scores = []
@@ -281,13 +316,18 @@ class RAGEngine:
             # Find the document text and metadata
             for stored_id, stored_doc in self._all_chunks:
                 if stored_id == chunk_id:
-                    result_docs.append(stored_doc)
-                    score = hybrid_scores.get(chunk_id, 0)
-                    result_scores.append(score)
                     # Get source from metadata
                     meta = self.collection.get(ids=[chunk_id])
                     if meta['metadatas']:
                         source = meta['metadatas'][0].get('source', 'unknown')
+                        
+                        # Skip excluded files (e.g., .debug)
+                        if self._should_exclude_file(source):
+                            break
+                        
+                        result_docs.append(stored_doc)
+                        score = hybrid_scores.get(chunk_id, 0)
+                        result_scores.append(score)
                         result_sources.append(source)
                     break
         
@@ -414,12 +454,49 @@ class RAGEngine:
         except Exception:
             return 'not_indexed'
     
+    def clean_excluded_files(self):
+        """Remove all chunks from excluded directories (e.g., .debug) from the database.
+        
+        This should be called periodically or after adding new exclusions to clean up
+        any previously-indexed files from blacklisted directories.
+        """
+        print("[RAG] Cleaning excluded files from database...")
+        
+        # Get all document IDs from collection
+        all_docs = self.collection.get()
+        if not all_docs['ids']:
+            print("[RAG] No documents in collection to clean.")
+            return
+        
+        excluded_ids = []
+        for doc_id, metadata in zip(all_docs['ids'], all_docs['metadatas']):
+            source = metadata.get('source', '')
+            if self._should_exclude_file(source):
+                excluded_ids.append(doc_id)
+                print(f"[RAG] Marking for removal: {source}")
+        
+        if excluded_ids:
+            print(f"[RAG] Removing {len(excluded_ids)} chunks from excluded directories...")
+            self.collection.delete(ids=excluded_ids)
+            
+            # Also remove from BM25 index and chunk tracking
+            self._all_chunks = [(cid, doc) for cid, doc in self._all_chunks if cid not in excluded_ids]
+            if self._all_chunks:
+                self.bm25.index([doc for _, doc in self._all_chunks])
+            
+            # Clear cache since index changed
+            self.query_cache.invalidate_all()
+            
+            print(f"[RAG] Removed {len(excluded_ids)} chunks from excluded directories.")
+        else:
+            print("[RAG] No excluded files found in database.")
+    
     def index_project(self):
         """Walks the project and indexes all markdown files."""
         # Invalidate entire cache for bulk reindexing
         self.query_cache.invalidate_all()
         
-        excluded_dirs = {".inkwell_rag", ".debug", ".git", "node_modules", "__pycache__", "venv", ".venv"}
+        excluded_dirs = EXCLUDED_DIRS
 
         for root, dirs, files in os.walk(self.project_path):
             # Prune excluded directories to avoid descending into them

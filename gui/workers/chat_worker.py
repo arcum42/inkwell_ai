@@ -7,8 +7,12 @@ class ChatWorker(QThread):
     """Worker thread for handling LLM chat interactions."""
     
     response_received = Signal(str)
+    response_chunk = Signal(str)  # Emit answer chunks as they arrive
+    response_thinking_start = Signal()  # Signal when model enters thinking phase
+    response_thinking_chunk = Signal(str)  # Emit thinking tokens
+    response_thinking_done = Signal()  # Signal when thinking phase ends
 
-    def __init__(self, provider, chat_history, model, context, system_prompt, images=None, enabled_tools=None):
+    def __init__(self, provider, chat_history, model, context, system_prompt, images=None, enabled_tools=None, mode="edit"):
         super().__init__()
         self.provider = provider
         # Create a copy of the history so we don't modify the original reference if we tweak it for the API
@@ -18,6 +22,7 @@ class ChatWorker(QThread):
         self.system_prompt = system_prompt
         self.images = images
         self.enabled_tools = enabled_tools  # Optional set of enabled tool names
+        self.mode = mode  # "edit" or "ask"
 
     def run(self):
         # Construct the messages list for the LLM
@@ -86,14 +91,86 @@ class ChatWorker(QThread):
             messages.append(msg)
 
         try:
-            print(f"DEBUG: About to call provider.chat with model={self.model}")
+            print(f"DEBUG: About to call provider with supports_streaming={self.provider.supports_streaming}")
             print(f"DEBUG: Provider type: {type(self.provider).__name__}")
-            response = self.provider.chat(messages, model=self.model)
-            print(f"DEBUG: Got response type: {type(response).__name__}")
+            
+            # Check if provider supports streaming
+            if self.provider.supports_streaming:
+                # Use streaming - provider has real streaming capability
+                full_response = ""
+                thinking_started = False
+                in_thinking = False
+                thinking_buffer = ""
+
+                start_markers = ["<think>", "<THINK>", "<|start_of_thought|>", "<|startofthought|>"]
+                end_markers = ["</think>", "<|end_of_thought|>", "<|endofthought|>"]
+
+                def find_first(marker_list, text):
+                    positions = [text.find(m) for m in marker_list if m in text]
+                    return min([p for p in positions if p != -1], default=-1)
+
+                def marker_len(marker_list, text, idx):
+                    for m in marker_list:
+                        pos = text.find(m)
+                        if pos == idx:
+                            return len(m)
+                    return 0
+
+                for raw_chunk in self.provider.chat_stream(messages, model=self.model):
+                    chunk = str(raw_chunk)
+                    # Process markers to separate thinking vs final answer
+                    text = chunk
+                    while text:
+                        if not in_thinking:
+                            start_idx = find_first(start_markers, text)
+                            if start_idx == -1:
+                                # Entire text is normal answer
+                                full_response += text
+                                self.response_chunk.emit(text)
+                                break
+                            # Emit any leading answer text before thinking starts
+                            leading = text[:start_idx]
+                            if leading:
+                                full_response += leading
+                                self.response_chunk.emit(leading)
+                            in_thinking = True
+                            if not thinking_started:
+                                thinking_started = True
+                                self.response_thinking_start.emit()
+                            # Skip marker
+                            consumed = marker_len(start_markers, text, start_idx)
+                            text = text[start_idx + consumed:]
+                        else:
+                            end_idx = find_first(end_markers, text)
+                            if end_idx == -1:
+                                # Entire chunk is thinking
+                                thinking_buffer += text
+                                self.response_thinking_chunk.emit(text)
+                                break
+                            # Emit thinking up to end marker
+                            thinking_part = text[:end_idx]
+                            if thinking_part:
+                                thinking_buffer += thinking_part
+                                self.response_thinking_chunk.emit(thinking_part)
+                            # Exit thinking state and skip marker
+                            consumed_end = marker_len(end_markers, text, end_idx)
+                            in_thinking = False
+                            self.response_thinking_done.emit()
+                            text = text[end_idx + consumed_end:]
+
+                # If stream ends while still in thinking, close it
+                if in_thinking:
+                    self.response_thinking_done.emit()
+                
+                # Emit full response for completion (answer only)
+                self.response_received.emit(full_response)
+            else:
+                # Fall back to non-streaming
+                response = self.provider.chat(messages, model=self.model)
+                self.response_received.emit(response)
         except Exception as e:
             import traceback
             print(f"ERROR: Exception in ChatWorker.run():")
             traceback.print_exc()
             response = f"Error calling LLM provider: {str(e)}"
-            
-        self.response_received.emit(response)
+            self.response_received.emit(response)

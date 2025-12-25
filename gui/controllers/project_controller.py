@@ -83,6 +83,9 @@ class ProjectController:
             # Initialize RAG
             self.window.rag_engine = RAGEngine(folder_path)
             
+            # Clean any previously-indexed files from excluded directories (e.g., .debug)
+            self.window.rag_engine.clean_excluded_files()
+            
             # Connect RAG engine to sidebar for status indicators
             if hasattr(self.window, 'sidebar'):
                 self.window.sidebar.set_rag_engine(self.window.rag_engine)
@@ -100,6 +103,11 @@ class ProjectController:
             self.window.indexing_progress.setTextVisible(True)
             self.window.indexing_progress.setFormat("Indexing: %p% (%v/%m)")
             self.window.statusBar().addWidget(self.window.indexing_progress)
+            
+            # Update personas in chat widget
+            personas = self.window.project_manager.get_all_personas()
+            active_name, _ = self.window.project_manager.get_active_persona()
+            self.window.chat.update_personas(personas, active_name)
             
             # Restore Tabs
             self.restore_project_state(folder_path)
@@ -223,9 +231,9 @@ class ProjectController:
         self.window.editor.open_files.clear()
         
         # Clear chat
-        self.window.save_current_chat_session()  # Save before clearing
+        self.window.chat_controller.save_current_chat_session()  # Save before clearing
         self.window.chat.clear_chat()
-        self.window.chat_history = []
+        self.window.chat_controller.chat_history = []
         self.window._raw_ai_responses = []  # Clear raw responses tracking
         
         # Cancel RAG indexing worker immediately
@@ -258,6 +266,12 @@ class ProjectController:
         
     def shutdown_on_close(self):
         """Handle cleanup when window closes."""
+        # Save current chat session before shutdown
+        try:
+            self.window.chat_controller.save_current_chat_session()
+        except Exception as e:
+            print(f"Error saving chat on shutdown: {e}")
+        
         # Immediately cancel and terminate indexing worker
         if self.index_worker is not None:
             try:

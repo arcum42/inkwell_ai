@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication, QSettings
 
 from gui.sidebar import Sidebar
 from core.project import ProjectManager
-from core.llm_provider import OllamaProvider, LMStudioProvider
+from core.llm_provider import OllamaProvider, LMStudioProvider, LMStudioNativeProvider
 from core.rag_engine import RAGEngine
 from gui.spell_checker import InkwellSpellChecker
 
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self.chat.model_changed.connect(self.on_model_changed)
         self.chat.refresh_models_requested.connect(self.on_refresh_models)
         self.chat.message_copied.connect(self.on_message_copied)
+        self.chat.persona_changed.connect(self.on_persona_changed)
         self.content_splitter.addWidget(self.chat)
 
         # Initialize controllers (after widgets are created)
@@ -130,6 +131,7 @@ class MainWindow(QMainWindow):
         self.chat.continue_requested.connect(self.chat_controller.handle_continue)
         self.chat.new_chat_requested.connect(self.chat_controller.handle_new_chat)
         self.chat.context_level_changed.connect(self.chat_controller.on_context_level_changed)
+        self.chat.mode_changed.connect(self.chat_controller.on_mode_changed)
 
         # Initialize model controls
         self.update_model_controls()
@@ -256,6 +258,12 @@ class MainWindow(QMainWindow):
         """Refresh available models from provider."""
         self.update_model_controls()
     
+    def on_persona_changed(self, persona_name):
+        """Handle persona selection change."""
+        if self.project_manager.get_root_path():
+            self.project_manager.select_active_persona(persona_name)
+            self.project_manager.save_tool_config()
+    
     def on_context_level_changed(self, level):
         """Handle context level change."""
         self.context_level = level
@@ -265,7 +273,10 @@ class MainWindow(QMainWindow):
         if provider_name == "Ollama":
             url = self.settings.value("ollama_url", "http://localhost:11434")
             return OllamaProvider(base_url=url)
-        else:
+        elif provider_name == "LM Studio (Native SDK)":
+            url = self.settings.value("lm_studio_native_url", "localhost:1234")
+            return LMStudioNativeProvider(base_url=url)
+        else:  # "LM Studio" (OpenAI-compatible)
             url = self.settings.value("lm_studio_url", "http://localhost:1234")
             return LMStudioProvider(base_url=url)
 
@@ -775,9 +786,11 @@ class MainWindow(QMainWindow):
         self.editor.open_files.clear()
         
         # Clear chat
-        self.save_current_chat_session()  # Save before clearing
+        if hasattr(self, 'chat_controller'):
+            self.chat_controller.save_current_chat_session()  # Save before clearing
         self.chat.clear_chat()
-        self.chat_history = []
+        if hasattr(self, 'chat_controller'):
+            self.chat_controller.chat_history = []
         self._raw_ai_responses = []  # Clear raw responses tracking
         
         # Cancel RAG indexing worker immediately
@@ -811,6 +824,12 @@ class MainWindow(QMainWindow):
                 pass
             # After settings are saved, refresh model controls
             self.update_model_controls()
+            
+            # Refresh persona dropdown if project is open
+            if self.project_manager.get_root_path():
+                personas = self.project_manager.get_all_personas()
+                active_name, _ = self.project_manager.get_active_persona()
+                self.chat.update_personas(personas, active_name)
 
     def open_image_studio(self):
         # Check if already open
@@ -1183,18 +1202,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Chat saved to history", 2000)
     
     def open_chat_history(self):
-        """Open the chat history dialog."""
-        from gui.dialogs.chat_history_dialog import ChatHistoryDialog
-        
-        dialog = ChatHistoryDialog(self.settings, self)
-        dialog.message_copy_requested.connect(self.copy_message_to_current_chat)
-        dialog.exec()
+        """Delegate to chat_controller for chat history management."""
+        self.chat_controller.open_chat_history()
     
     def copy_message_to_current_chat(self, message_content):
-        """Copy a message from history to current chat and send it."""
-        # Add to input field but don't send automatically
-        self.chat.input_field.setPlainText(message_content)
-        self.chat.input_field.setFocus()
+        """Delegate to chat_controller."""
+        self.chat_controller.copy_message_to_current_chat(message_content)
 
     def export_debug_log(self):
         """Export current chat session and debug info to a timestamped file."""
@@ -1232,7 +1245,9 @@ class MainWindow(QMainWindow):
 """
         
         # Add chat messages (rendered/processed version with links)
-        for sender, text in self.chat.messages:
+        for msg_tuple in self.chat.messages:
+            sender = msg_tuple[0]
+            text = msg_tuple[1]
             content += f"\n### {sender}\n\n{text}\n\n---\n"
         
         # Add raw AI responses section (before parsing, shows original PATCH/UPDATE/diff blocks)

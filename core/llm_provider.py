@@ -4,7 +4,7 @@ This module maintains backward compatibility with code using the old import path
     from core.llm_provider import LLMProvider, OllamaProvider, LMStudioProvider
 
 The actual implementations are now in the core.llm module:
-    from core.llm import LLMProvider, OllamaProvider, LMStudioProvider
+    from core.llm import LLMProvider, OllamaProvider, LMStudioProvider, LMStudioNativeProvider
 
 This wrapper file is deprecated and will be removed in a future version.
 Please update your imports to use core.llm directly.
@@ -15,10 +15,12 @@ from core.llm import (
     LLMProvider,
     OllamaProvider,
     LMStudioProvider,
+    LMStudioNativeProvider,
 )
 
 __all__ = [
     'LLMProvider',
     'OllamaProvider',
     'LMStudioProvider',
+    'LMStudioNativeProvider',
 ]

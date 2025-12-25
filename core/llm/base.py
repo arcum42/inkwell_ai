@@ -4,6 +4,11 @@
 class LLMProvider:
     """Base class for language model providers."""
     
+    # Class attribute indicating if this provider supports streaming responses
+    # Default: False (provider implements chat_stream with fallback to chat())
+    # Set to True when provider has real streaming implementation
+    supports_streaming = False
+    
     def chat(self, messages, model=None):
         """Send a chat message to the LLM.
         
@@ -15,6 +20,28 @@ class LLMProvider:
             String response from the model
         """
         raise NotImplementedError
+    
+    def chat_stream(self, messages, model=None):
+        """Stream chat response tokens as they are generated.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys
+            model: Model name to use (provider-specific)
+            
+        Yields:
+            String tokens/fragments as they are generated
+            
+        Default Implementation (when supports_streaming=False):
+            Falls back to non-streaming chat() and yields entire response as one chunk.
+            This ensures all providers work with streaming infrastructure even if
+            they don't have real streaming capability yet.
+            
+        Real Streaming (when supports_streaming=True):
+            Subclass implementation yields tokens as they arrive from the provider.
+            Example: LMStudioNativeProvider uses SDK's respond_stream() method.
+        """
+        response = self.chat(messages, model=model)
+        yield response
     
     def list_models(self):
         """List available models.

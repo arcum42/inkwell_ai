@@ -1,9 +1,10 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QPlainTextEdit, QPushButton, QHBoxLayout, QLabel, QLayout, QComboBox
-from PySide6.QtCore import Signal, Qt, QSize, QRect, QPoint
-from PySide6 import QtGui # Need QtGui for cursors in thinking logic
-from PySide6.QtGui import QClipboard
+import html
 
 import markdown
+from PySide6 import QtGui  # Need QtGui for cursors in thinking logic
+from PySide6.QtCore import Signal, Qt, QSize, QRect, QPoint
+from PySide6.QtGui import QClipboard
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QPlainTextEdit, QPushButton, QHBoxLayout, QLabel, QLayout, QComboBox
 
 
 class FlowLayout(QLayout):
@@ -107,7 +108,9 @@ class ChatWidget(QWidget):
     model_changed = Signal(str)  # Emits new model name
     refresh_models_requested = Signal()  # Request to refresh available models
     context_level_changed = Signal(str)  # Emits context level: "None", "Visible", "All", "Full"
+    mode_changed = Signal(str)  # Emits mode: "ask" or "edit"
     message_copied = Signal(str)  # Emits "message" or "chat" when copied
+    persona_changed = Signal(str)  # Emits persona name when changed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,7 +124,7 @@ class ChatWidget(QWidget):
         
         # Provider dropdown
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["Ollama", "LM Studio"])
+        self.provider_combo.addItems(["Ollama", "LM Studio", "LM Studio (Native SDK)"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         self.provider_combo.setMinimumWidth(100)
         controls_layout.addWidget(self.provider_combo)
@@ -140,12 +143,36 @@ class ChatWidget(QWidget):
         
         self.layout.addLayout(controls_layout)
         
+        # Persona Selection (if project is open)
+        persona_layout = QHBoxLayout()
+        persona_layout.setContentsMargins(0, 0, 0, 5)
+        persona_layout.setSpacing(8)
+        
+        persona_label = QLabel("Persona:")
+        persona_label.setStyleSheet("font-size: 9pt;")
+        persona_layout.addWidget(persona_label)
+        
+        self.persona_combo = QComboBox()
+        self.persona_combo.currentIndexChanged.connect(self.on_persona_changed)
+        persona_layout.addWidget(self.persona_combo, 1)
+        
+        self.layout.addLayout(persona_layout)
+        
         # Chat History
         self.history = ChatBrowser()
         self.history.setOpenExternalLinks(False)
         self.history.setOpenLinks(False) # Disable auto-navigation for all links
         self.history.anchorClicked.connect(self.on_anchor_clicked)
         self.layout.addWidget(self.history, 1)  # Give this most of the space (stretch factor 1)
+
+        # Thinking state (used when models emit reasoning text)
+        self.thinking_buffer = ""
+        self.thinking_active = False
+        self.thinking_expanded = False
+        self.thinking_present = False
+        self.thinking_title = "Assistant is thinking…"
+        self.current_mode = "edit"  # Default mode: edit or ask
+        self.streaming_response = False  # Track if we're currently streaming a response
         
         # Chat Control Buttons - Wrappable layout
         button_layout = FlowLayout()
@@ -210,6 +237,23 @@ class ChatWidget(QWidget):
         context_layout.addWidget(self.context_combo, 1)
         
         self.layout.addLayout(context_layout)
+        
+        # Mode Selector
+        mode_layout = QHBoxLayout()
+        mode_layout.setContentsMargins(0, 0, 0, 5)
+        mode_layout.setSpacing(5)
+        
+        mode_label = QLabel("Mode:")
+        mode_label.setStyleSheet("font-size: 9pt;")
+        mode_layout.addWidget(mode_label)
+        
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Ask", "Edit"])
+        self.mode_combo.setCurrentIndex(1)  # Default to Edit
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.mode_combo, 1)
+        
+        self.layout.addLayout(mode_layout)
         
         # Input Area - Taller with QPlainTextEdit for multi-line
         input_layout = QVBoxLayout()
@@ -303,6 +347,39 @@ class ChatWidget(QWidget):
         """Emit signal to refresh available models."""
         self.refresh_models_requested.emit()
     
+    def on_persona_changed(self, index):
+        """Emit signal when persona changes."""
+        if index >= 0:
+            persona_name = self.persona_combo.currentText()
+            if persona_name:
+                self.persona_changed.emit(persona_name)
+    
+    def update_personas(self, personas, active_name=None):
+        """Update the persona dropdown with available personas.
+        
+        Args:
+            personas: Dict of {name: prompt}
+            active_name: Name of the currently active persona
+        """
+        self.persona_combo.blockSignals(True)
+        self.persona_combo.clear()
+        
+        if not personas:
+            self.persona_combo.addItem("(No personas)")
+            self.persona_combo.setEnabled(False)
+        else:
+            sorted_names = sorted(personas.keys())
+            for name in sorted_names:
+                self.persona_combo.addItem(name)
+            
+            # Set the active persona
+            if active_name and active_name in personas:
+                self.persona_combo.setCurrentText(active_name)
+            
+            self.persona_combo.setEnabled(True)
+        
+        self.persona_combo.blockSignals(False)
+    
     def on_context_level_changed(self, index):
         """Emit signal when context level changes."""
         level = self.context_combo.itemText(index)
@@ -316,9 +393,45 @@ class ChatWidget(QWidget):
         elif level == "Full":
             level = "full"
         self.context_level_changed.emit(level)
+    
+    def on_mode_changed(self, index):
+        """Emit signal when mode changes."""
+        mode = self.mode_combo.itemText(index).lower()
+        self.current_mode = mode
+        self.mode_changed.emit(mode)
 
     def on_anchor_clicked(self, url):
         url_str = url.toString()
+        
+        if url_str == "show-thinking":
+            # Show thinking text in a dialog without mixing into chat
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Thinking trace")
+            dialog.setMinimumSize(500, 300)
+            layout = QVBoxLayout(dialog)
+            text_edit = QTextEdit()
+            text_edit.setPlainText(self.thinking_buffer if self.thinking_buffer else "(No thinking text captured)")
+            text_edit.setReadOnly(True)
+            layout.addWidget(text_edit)
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            buttons.accepted.connect(dialog.accept)
+            layout.addWidget(buttons)
+            dialog.exec()
+            return
+        if url_str == "toggle-thinking":
+            self.thinking_expanded = not self.thinking_expanded
+            self._render_thinking_block(done=not self.thinking_active)
+            return
+        if url_str.startswith("raw:"):
+            try:
+                msg_id = url_str.split(":", 1)[1]
+                msg_index = int(msg_id)
+                self.handle_raw_message(msg_index)
+                return
+            except Exception:
+                pass
         
         # Handle edit/delete links - parse both index and UUID formats
         if url_str.startswith("edit:"):
@@ -362,7 +475,10 @@ class ChatWidget(QWidget):
         if msg_index >= len(self.messages):
             return
         
-        sender, old_text = self.messages[msg_index]
+        msg_tuple = self.messages[msg_index]
+        sender = msg_tuple[0]
+        old_text = msg_tuple[1]
+        raw_text = msg_tuple[2] if len(msg_tuple) > 2 else old_text
         
         # Use QInputDialog for multiline input
         from PySide6.QtWidgets import QInputDialog, QTextEdit, QDialog, QVBoxLayout, QDialogButtonBox
@@ -384,7 +500,8 @@ class ChatWidget(QWidget):
         if dialog.exec() == QDialog.Accepted:
             new_text = text_edit.toPlainText().strip()
             if new_text and new_text != old_text:
-                self.messages[msg_index] = (sender, new_text)
+                # Preserve raw text (or use new text as raw)
+                self.messages[msg_index] = (sender, new_text, raw_text)
                 self.message_edited.emit(msg_index, new_text)
                 self.rebuild_chat_display()
     
@@ -409,8 +526,11 @@ class ChatWidget(QWidget):
         self.history.clear()
         temp_messages = list(self.messages)
         self.messages.clear()
-        for sender, text in temp_messages:
-            self.append_message(sender, text)
+        for msg_tuple in temp_messages:
+            sender = msg_tuple[0]
+            text = msg_tuple[1]
+            raw_text = msg_tuple[2] if len(msg_tuple) > 2 else text
+            self.append_message(sender, text, raw_text=raw_text)
     
     def on_regenerate(self):
         """Request to regenerate the last AI response."""
@@ -439,10 +559,11 @@ class ChatWidget(QWidget):
                 return
         super().keyPressEvent(event)
 
-    def append_message(self, sender, text):
-        # Store message for later reference
+    def append_message(self, sender, text, raw_text=None):
+        # Store message for later reference (with optional raw version)
         msg_index = len(self.messages)
-        self.messages.append((sender, text))
+        self.messages.append((sender, text, raw_text or text))  # Store as 3-tuple
+        autoscroll = self._should_autoscroll()
         
         # Convert Markdown to HTML
         html_content = markdown.markdown(text)
@@ -455,7 +576,8 @@ class ChatWidget(QWidget):
         <div style="margin-top: 5px;">
             <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
             <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
-            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📋 Copy</a>
+            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
+            <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
         </div>
         '''
         
@@ -468,44 +590,261 @@ class ChatWidget(QWidget):
         <hr>
         """
         self.history.append(formatted_msg)
+        if autoscroll:
+            self._scroll_to_bottom(force=True)
+
+    def begin_thinking(self):
+        """Show a lightweight thinking indicator with a toggle link."""
+        self.thinking_buffer = ""
+        self.thinking_active = True
+        self.thinking_expanded = False
+        self.thinking_present = True
+        self._render_thinking_block()
+
+    def append_thinking_chunk(self, chunk: str):
+        """Accumulate thinking text without showing it inline."""
+        if not self.thinking_active:
+            return
+        self.thinking_buffer += chunk
+        if self.thinking_present and self.thinking_expanded:
+            self._render_thinking_block()
+
+    def finish_thinking(self):
+        """Mark thinking as done and update indicator text."""
+        if not self.thinking_active:
+            return
+        self.thinking_active = False
+        self.thinking_present = True
+        self._render_thinking_block(done=True)
+
+    def _render_thinking_block(self, done: bool = False):
+        """Insert or update the inline thinking block with toggle and optional content."""
+        if not self.thinking_present:
+            return
+        autoscroll = self._should_autoscroll()
+        self._remove_thinking_blocks()
+
+        status = "complete" if done else "in progress"
+        title = self.thinking_title if not done else "Thinking complete"
+        toggle_label = "Hide" if self.thinking_expanded else "Show"
+        content_html = ""
+        if self.thinking_expanded and self.thinking_buffer:
+            escaped = html.escape(self.thinking_buffer)
+            content_html = (
+                '<div style="margin-top:4px;white-space:pre-wrap;font-family:monospace;'
+                'font-size:10pt;border-top:1px dashed #ccc;padding-top:4px;">'
+                f"{escaped}"
+                "</div>"
+            )
+
+        body = (
+            '<div style="background:#f5f5f5;padding:6px;border:1px solid #ddd;">'
+            f"<b>{title}</b> "
+            f'<span style="font-size:9pt;color:#666;">({status})</span> '
+            f'<a href="toggle-thinking">{toggle_label}</a> | '
+            '<a href="show-thinking">Dialog</a>'
+            '</div>'
+            f"{content_html}"
+        )
+
+        self.history.append(body)
+        if autoscroll:
+            self._scroll_to_bottom()
+
+    def _remove_thinking_blocks(self):
+        """Remove any existing thinking blocks to avoid duplication before re-rendering."""
+        doc = self.history.document()
+        # Loop until no toggle anchors remain
+        while True:
+            cursor = doc.find("toggle-thinking", 0)
+            if cursor.isNull():
+                break
+            cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
+            cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+            # Remove potential trailing content block if present (expanded state)
+            cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+            if cursor.selectedText():
+                cursor.removeSelectedText()
+                cursor.deletePreviousChar()
+
+    def begin_streaming_response(self):
+        """Start a new Assistant message block for streaming."""
+        if not self.streaming_response:
+            self.streaming_response = True
+            # Store index where streaming message starts
+            msg_index = len(self.messages)
+            self.messages.append(("Assistant", ""))
+            
+            # Add message header with controls
+            sender_color = "#2196F3"
+            controls_html = f'''
+            <div style="margin-top: 5px;">
+                <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
+                <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
+                <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
+                <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
+            </div>
+            '''
+            
+            formatted_msg = f"""
+            <div style="margin-bottom: 10px;" data-msg-index="{msg_index}" id="streaming-message">
+                <b style="color: {sender_color};">Assistant:</b>
+                <div style="margin-top: 5px;" id="streaming-content"></div>
+                {controls_html}
+            </div>
+            <hr>
+            """
+            self.history.append(formatted_msg)
+    
+    def finish_streaming_response(self, final_text: str, raw_text: str = None):
+        """Replace streamed content with final parsed/formatted response.
+        
+        Args:
+            final_text: Final formatted response after parsing
+            raw_text: Original unparsed response for Raw button (optional)
+        """
+        if not self.streaming_response:
+            return
+        
+        self.streaming_response = False
+        
+        # Update stored message with final content (store both display and raw)
+        if self.messages and self.messages[-1][0] == "Assistant":
+            self.messages[-1] = ("Assistant", final_text, raw_text or final_text)
+        
+        # Find and replace the streaming message div
+        doc = self.history.document()
+        cursor = doc.find("streaming-message")
+        if not cursor.isNull():
+            # Select the entire streaming message block
+            cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
+            # Find the end (next <hr> or end of doc)
+            start_pos = cursor.position()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            cursor.setPosition(start_pos, QtGui.QTextCursor.KeepAnchor)
+            
+            # Search for closing hr
+            text = cursor.selectedText()
+            # Remove old content
+            cursor.removeSelectedText()
+            
+        # Now append the properly formatted final message
+        msg_index = len(self.messages) - 1
+        html_content = markdown.markdown(final_text)
+        sender_color = "#2196F3"
+        
+        controls_html = f'''
+        <div style="margin-top: 5px;">
+            <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
+            <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
+            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
+            <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
+        </div>
+        '''
+        
+        formatted_msg = f"""
+        <div style="margin-bottom: 10px;" data-msg-index="{msg_index}">
+            <b style="color: {sender_color};">Assistant:</b>
+            <div style="margin-top: 5px;">{html_content}</div>
+            {controls_html}
+        </div>
+        <hr>
+        """
+        self.history.append(formatted_msg)
+
+    def append_response_chunk(self, chunk: str):
+        """Append a chunk of streaming response to the chat.
+        
+        Called as tokens arrive from the LLM during streaming.
+        Appends text directly to the current response without processing.
+        
+        Args:
+            chunk: String token/chunk to append
+        """
+        # Get the text cursor and move to end
+        autoscroll = self._should_autoscroll()
+        cursor = self.history.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        cursor.insertText(chunk)
+
+        if autoscroll:
+            self._scroll_to_bottom()
 
     def handle_copy_message(self, msg_index):
         """Copy a single message's raw text to clipboard."""
         if msg_index >= len(self.messages):
             return
-        _, text = self.messages[msg_index]
+        msg_tuple = self.messages[msg_index]
+        text = msg_tuple[1]  # Copy display text
         clipboard = QtGui.QGuiApplication.clipboard()
         clipboard.setText(text, QClipboard.Clipboard)
         self.message_copied.emit("message")
+
+    def handle_raw_message(self, msg_index):
+        """Show a dialog with the exact stored text for troubleshooting."""
+        if msg_index >= len(self.messages):
+            return
+        # Messages are stored as (sender, display_text, raw_text) tuples
+        msg_tuple = self.messages[msg_index]
+        raw_text = msg_tuple[2] if len(msg_tuple) > 2 else msg_tuple[1]
+        
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Raw message")
+        dialog.setMinimumSize(500, 300)
+
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setPlainText(raw_text)
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
+    def _should_autoscroll(self, threshold: int = 4) -> bool:
+        """Return True if the view is within `threshold` pixels of bottom."""
+        scrollbar = self.history.verticalScrollBar()
+        return scrollbar.maximum() - scrollbar.value() <= threshold
+
+    def _scroll_to_bottom(self, force: bool = False):
+        """Scroll to bottom if force or user was already near bottom."""
+        scrollbar = self.history.verticalScrollBar()
+        if force or self._should_autoscroll():
+            scrollbar.setValue(scrollbar.maximum())
     
     def clear_chat(self):
         """Clear all messages."""
         self.messages.clear()
         self.history.clear()
+        self.thinking_buffer = ""
+        self.thinking_active = False
+        self.thinking_present = False
+        self.thinking_expanded = False
 
     def show_thinking(self):
         """Appends a temporary 'Thinking...' message."""
-        # We use a special ID or marker we can find/remove? 
-        # Actually, since we append, it's at the end. We can just remember we added it.
-        # But QTextBrowser appends HTML. 
-        # A simple way is to append a block.
+        autoscroll = self._should_autoscroll()
         self.history.append('<div style="color: gray; font-style: italic;">AI is thinking...</div>')
-        self.history.moveCursor(QtGui.QTextCursor.End) # Ensure we scroll to bottom
+        if autoscroll:
+            self._scroll_to_bottom()
 
     def remove_thinking(self):
         """Removes the last block (assumed to be the 'Thinking...' message)."""
-        # This is tricky with pure HTML append.
-        # We can use the cursor to select the last block and delete it.
-        cursor = self.history.textCursor()
-        cursor.movePosition(QtGui.QTextCursor.End)
-        
-        # Select the last block/line. 
-        # "AI is thinking..." might be its own block.
-        cursor.select(QtGui.QTextCursor.BlockUnderCursor)
-        cursor.removeSelectedText()
-        
-        # Also remove the newline/block separator if needed
-        cursor.deletePreviousChar()
+        if not self.thinking_present:
+            return
+        self._remove_thinking_blocks()
+        self.thinking_present = False
+        self.thinking_active = False
+        self.thinking_expanded = False
+        self.thinking_buffer = ""
 
     def get_chat_as_text(self):
         """Returns the formatted chat history as plain text."""

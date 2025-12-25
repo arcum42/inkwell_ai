@@ -55,6 +55,9 @@ class CodeEditor(QPlainTextEdit):
             misspelled_words: Set of misspelled words
         """
         self.misspelled_words = misspelled_words
+        # Preserve document modified state so spell-check formatting doesn't re-flag the tab
+        doc = self.document()
+        was_modified = doc.isModified()
         
         # Create format for misspelled words (red wavy underline)
         misspelled_format = QTextCharFormat()
@@ -62,7 +65,7 @@ class CodeEditor(QPlainTextEdit):
         misspelled_format.setUnderlineColor(QColor(255, 0, 0))  # Red
         
         # Apply formatting to all misspelled words
-        cursor = QTextCursor(self.document())
+        cursor = QTextCursor(doc)
         
         while not cursor.atEnd():
             cursor.movePosition(QTextCursor.NextWord, QTextCursor.KeepAnchor)
@@ -78,6 +81,10 @@ class CodeEditor(QPlainTextEdit):
                 cursor.setCharFormat(QTextCharFormat())
             
             cursor.movePosition(QTextCursor.NextWord)
+        
+        # Restore original modified flag
+        if doc.isModified() != was_modified:
+            doc.setModified(was_modified)
     
     def contextMenuEvent(self, event):
         """Handle right-click context menu with spell-check suggestions."""
