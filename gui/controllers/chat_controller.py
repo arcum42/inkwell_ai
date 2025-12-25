@@ -577,10 +577,17 @@ class ChatController:
             QMessageBox.information(self.window, "Nothing to Regenerate", "No AI response found to regenerate.")
             return
         
-        # Remove the last assistant message
+        # Remove the last assistant message from history and rebuild the chat view
         del self.chat_history[last_assistant_idx]
-        del self.window.chat.messages[last_assistant_idx]
-        self.window.chat.rebuild_chat_display()
+        self.window.chat.clear_chat()
+        for msg in self.chat_history:
+            role = msg.get("role")
+            sender = {
+                "user": "User",
+                "assistant": "Assistant",
+                "tool": "Tool",
+            }.get(role, "System")
+            self.window.chat.append_message(sender, msg.get("content", ""))
         
         # Show thinking indicator
         self.window.chat.show_thinking()

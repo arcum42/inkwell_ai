@@ -2287,7 +2287,7 @@ class MainWindow(QMainWindow):
         # Gather session info
         provider_name = self.settings.value("llm_provider", "Ollama")
         model_name = self.settings.value("ollama_model", "llama3")
-        context_level = self.context_level
+        context_level = getattr(self.chat_controller, "context_level", "visible")
         
         # Build debug content
         content = f"""# Debug Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -2308,15 +2308,17 @@ class MainWindow(QMainWindow):
             content += f"\n### {sender}\n\n{text}\n\n---\n"
         
         # Add raw AI responses section (before parsing, shows original PATCH/UPDATE/diff blocks)
-        if self._raw_ai_responses:
+        raw_ai_responses = getattr(self.chat_controller, "_raw_ai_responses", [])
+        if raw_ai_responses:
             content += "\n\n## Raw AI Responses (Before Parsing)\n\n"
-            for idx, raw_resp in enumerate(self._raw_ai_responses, 1):
+            for idx, raw_resp in enumerate(raw_ai_responses, 1):
                 content += f"\n### AI Response #{idx}\n\n```\n{raw_resp}\n```\n\n---\n"
         
         # Add pending edits info
-        if self.pending_edits:
+        pending_edits = getattr(self.chat_controller, "pending_edits", {})
+        if pending_edits:
             content += "\n## Pending Edits\n\n"
-            for edit_id, (path, new_content) in self.pending_edits.items():
+            for edit_id, (path, new_content) in pending_edits.items():
                 content += f"### {path} (ID: {edit_id})\n\n```\n{new_content[:500]}...\n```\n\n"
         
         # Write to file
