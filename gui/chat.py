@@ -101,10 +101,13 @@ class ChatWidget(QWidget):
     message_deleted = Signal(int)  # Emits message index to delete
     message_edited = Signal(int, str)  # Emits message index and new content
     regenerate_requested = Signal()  # Request to regenerate last response
+    continue_requested = Signal()  # Request to continue generation
+    new_chat_requested = Signal()  # Request to start a new chat (saves current first)
     provider_changed = Signal(str)  # Emits new provider name (Ollama or LM Studio)
     model_changed = Signal(str)  # Emits new model name
     refresh_models_requested = Signal()  # Request to refresh available models
     context_level_changed = Signal(str)  # Emits context level: "None", "Visible", "All", "Full"
+    message_copied = Signal(str)  # Emits "message" or "chat" when copied
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -125,7 +128,7 @@ class ChatWidget(QWidget):
         
         # Model dropdown
         self.model_combo = QComboBox()
-        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        self.model_combo.currentIndexChanged.connect(self.on_model_changed)  # Use index change instead of text
         controls_layout.addWidget(self.model_combo, 1)  # Give model combo most of the space
         
         # Refresh button
@@ -153,6 +156,18 @@ class ChatWidget(QWidget):
         regenerate_btn.setToolTip("Regenerate the last AI response")
         regenerate_btn.clicked.connect(self.on_regenerate)
         button_layout.addWidget(regenerate_btn)
+
+        continue_btn = QPushButton("⏩")
+        continue_btn.setMaximumWidth(40)
+        continue_btn.setToolTip("Continue the AI response if it stopped early")
+        continue_btn.clicked.connect(self.on_continue)
+        button_layout.addWidget(continue_btn)
+        
+        new_chat_btn = QPushButton("🆕")
+        new_chat_btn.setMaximumWidth(40)
+        new_chat_btn.setToolTip("Start a new chat (saves current chat to history)")
+        new_chat_btn.clicked.connect(self.on_new_chat)
+        button_layout.addWidget(new_chat_btn)
         
         save_chat_btn = QPushButton("📁")
         save_chat_btn.setMaximumWidth(40)
@@ -277,11 +292,12 @@ class ChatWidget(QWidget):
         if provider_name:
             self.provider_changed.emit(provider_name)
     
-    def on_model_changed(self, model_name):
+    def on_model_changed(self, index):
         """Emit signal when model changes (gets actual model name from combo box data)."""
-        actual_model = self.model_combo.currentData()
-        if actual_model:
-            self.model_changed.emit(actual_model)
+        if index >= 0:
+            actual_model = self.model_combo.currentData()
+            if actual_model:
+                self.model_changed.emit(actual_model)
     
     def on_refresh_models(self):
         """Emit signal to refresh available models."""
@@ -308,13 +324,15 @@ class ChatWidget(QWidget):
         if url_str.startswith("edit:"):
             try:
                 msg_id = url_str.split(":", 1)[1]  # Split on first colon only
-                # Try as integer index first, then treat as UUID
+                # Try as integer index first (inline message edit)
                 try:
                     msg_index = int(msg_id)
                     self.handle_edit_message(msg_index)
+                    return
                 except ValueError:
-                    # It's a UUID, not an index - ignore for now
-                    pass
+                    # UUID edit link for pending changes -> bubble up to main window
+                    self.link_clicked.emit(url_str)
+                    return
             except Exception:
                 pass
         elif url_str.startswith("delete:"):
@@ -327,6 +345,13 @@ class ChatWidget(QWidget):
                 except ValueError:
                     # It's a UUID, not an index - ignore for now
                     pass
+            except Exception:
+                pass
+        elif url_str.startswith("copy:"):
+            try:
+                msg_id = url_str.split(":", 1)[1]
+                msg_index = int(msg_id)
+                self.handle_copy_message(msg_index)
             except Exception:
                 pass
         else:
@@ -390,6 +415,14 @@ class ChatWidget(QWidget):
     def on_regenerate(self):
         """Request to regenerate the last AI response."""
         self.regenerate_requested.emit()
+
+    def on_continue(self):
+        """Request to continue the current AI response."""
+        self.continue_requested.emit()
+    
+    def on_new_chat(self):
+        """Request to start a new chat (saves current first)."""
+        self.new_chat_requested.emit()
     
     def send_message(self):
         text = self.input_field.toPlainText().strip()
@@ -421,7 +454,8 @@ class ChatWidget(QWidget):
         controls_html = f'''
         <div style="margin-top: 5px;">
             <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
-            <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">🗑️ Delete</a>
+            <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
+            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📋 Copy</a>
         </div>
         '''
         
@@ -434,6 +468,15 @@ class ChatWidget(QWidget):
         <hr>
         """
         self.history.append(formatted_msg)
+
+    def handle_copy_message(self, msg_index):
+        """Copy a single message's raw text to clipboard."""
+        if msg_index >= len(self.messages):
+            return
+        _, text = self.messages[msg_index]
+        clipboard = QtGui.QGuiApplication.clipboard()
+        clipboard.setText(text, QClipboard.Clipboard)
+        self.message_copied.emit("message")
     
     def clear_chat(self):
         """Clear all messages."""
@@ -490,4 +533,5 @@ class ChatWidget(QWidget):
         content = self.get_chat_as_text()
         clipboard = QtGui.QGuiApplication.clipboard()
         clipboard.setText(content, QClipboard.Clipboard)
+        self.message_copied.emit("chat")
 

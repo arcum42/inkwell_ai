@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QDialogButtonBox, QSplitter, QWidget, QPushButton, QStackedWidget, QTextBrowser
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
 import markdown
 import difflib
 
@@ -35,6 +36,14 @@ class DiffPanel(QWidget):
         if content:
             html = markdown.markdown(content, extensions=['fenced_code', 'tables'])
             self.preview.setHtml(html)
+        # Match preview background/text to app palette for better dark-mode readability
+        pal = self.preview.palette()
+        self.preview.setStyleSheet(
+            "QTextBrowser { background: %s; color: %s; }" % (
+                pal.color(QPalette.Base).name(),
+                pal.color(QPalette.Text).name(),
+            )
+        )
         self.stack.addWidget(self.preview)
         
         self.layout.addWidget(self.stack)
@@ -48,12 +57,14 @@ class DiffPanel(QWidget):
             self.stack.setCurrentIndex(0)
 
 class DiffDialog(QDialog):
-    def __init__(self, file_path, old_content, new_content, parent=None):
+    def __init__(self, file_path, old_content, new_content, parent=None, selection_range: tuple[int, int] | None = None, default_apply_only_selection: bool = False):
         super().__init__(parent)
         self.setWindowTitle(f"Review Changes - {file_path}")
         self.resize(1200, 700)
         self._old_text = old_content or ""
         self._new_text = new_content or ""
+        self._selection_range = selection_range
+        self._apply_only_selection = False
         
         layout = QVBoxLayout(self)
         
@@ -68,6 +79,18 @@ class DiffDialog(QDialog):
         summary_label = QLabel(f"Changes: +{add_count} / -{del_count} / ~{chg_count}")
         summary_label.setStyleSheet("color: #444; font-style: italic; margin-bottom: 6px;")
         layout.addWidget(summary_label)
+
+        # Selection info and checkbox
+        if self._selection_range:
+            s, e = self._selection_range
+            sel_label = QLabel(f"Selection: L{s}-L{e}")
+            sel_label.setStyleSheet("color: #666; margin-bottom: 4px;")
+            layout.addWidget(sel_label)
+            from PySide6.QtWidgets import QCheckBox
+            self._selection_cb = QCheckBox("Apply only within selected range")
+            self._selection_cb.setChecked(bool(default_apply_only_selection))
+            self._selection_cb.toggled.connect(lambda v: setattr(self, '_apply_only_selection', bool(v)))
+            layout.addWidget(self._selection_cb)
         
         # Main splitter: top = side-by-side, bottom = HTML diff
         main_splitter = QSplitter(Qt.Vertical)
@@ -87,7 +110,13 @@ class DiffDialog(QDialog):
         diff_view = QTextBrowser()
         diff_view.setOpenExternalLinks(False)
         diff_view.setOpenLinks(False)
-        diff_view.setStyleSheet("QTextBrowser { font-family: monospace; }")
+        pal = diff_view.palette()
+        diff_view.setStyleSheet(
+            "QTextBrowser { font-family: monospace; background: %s; color: %s; }" % (
+                pal.color(QPalette.Base).name(),
+                pal.color(QPalette.Text).name(),
+            )
+        )
         self._show_context = True
         self._diff_view = diff_view
         diff_html = self._build_diff_html(self._old_text, self._new_text, context=self._show_context)
@@ -116,6 +145,9 @@ class DiffDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
+    def apply_only_selection(self) -> bool:
+        return bool(self._apply_only_selection)
+
     def _build_diff_html(self, old_text: str, new_text: str, context: bool = True) -> str:
         """Generate an HTML side-by-side diff table.
         Uses difflib.HtmlDiff for clear visual differences.
@@ -130,16 +162,27 @@ class DiffDialog(QDialog):
             context=context,
             numlines=2,
         )
-        # Add minimal styling for readability
-        style = """
+        # Add palette-aware styling for readability (dark/light)
+        pal = self.palette()
+        base = pal.color(QPalette.Base).name()
+        text = pal.color(QPalette.Text).name()
+        header = pal.color(QPalette.AlternateBase).name()
+        # Dark mode: text is light (high lightness), use dark backgrounds with light text
+        # Light mode: text is dark (low lightness), use light backgrounds with dark text
+        is_dark_mode = pal.color(QPalette.Text).lightness() > 128
+        add = "#1a3d1a" if is_dark_mode else "#e6ffed"
+        sub = "#4d1a1a" if is_dark_mode else "#ffecec"
+        chg = "#4d3d0d" if is_dark_mode else "#fff5b1"
+        nxt = pal.color(QPalette.Button).name()
+        style = f"""
         <style>
-        table.diff {font-family: monospace; border:1px solid #ccc; border-collapse:collapse;}
-        .diff_header {background:#f0f0f0; padding:4px;}
-        .diff_next {background:#e8e8e8;}
-        .diff_add {background:#e6ffed;}
-        .diff_chg {background:#fff5b1;}
-        .diff_sub {background:#ffecec;}
-        td {padding:2px 4px;}
+        table.diff {{font-family: monospace; border:1px solid {header}; border-collapse:collapse; background:{base}; color:{text};}}
+        .diff_header {{background:{header}; padding:4px;}}
+        .diff_next {{background:{nxt};}}
+        .diff_add {{background:{add}; color:{text};}}
+        .diff_chg {{background:{chg}; color:{text};}}
+        .diff_sub {{background:{sub}; color:{text};}}
+        td {{padding:2px 4px;}}
         </style>
         """
         return style + diff

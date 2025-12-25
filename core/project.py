@@ -31,6 +31,38 @@ class ProjectManager:
         except Exception as e:
             print(f"WARN: Failed to load tool config {config_path}: {e}")
 
+    def get_active_persona(self):
+        """Return (name, prompt) for the active persona if configured."""
+        if not isinstance(self.tool_config, dict):
+            return None, None
+        personas = self.tool_config.get('personas', {})
+        active_name = self.tool_config.get('active_persona')
+        if isinstance(personas, dict) and active_name in personas:
+            prompt = personas.get(active_name)
+            if isinstance(prompt, str) and prompt.strip():
+                return active_name, prompt
+        return None, None
+
+    def get_system_prompt(self, default_prompt: str) -> str:
+        """Return project-specific system prompt, falling back to provided default."""
+        _, prompt = self.get_active_persona()
+        if prompt:
+            return prompt
+        return default_prompt
+
+    def set_active_persona(self, name: str, prompt: str):
+        """Set the active persona name and prompt in project config."""
+        if not isinstance(name, str) or not name.strip():
+            return
+        if not isinstance(prompt, str) or not prompt.strip():
+            return
+        personas = self.tool_config.get('personas')
+        if not isinstance(personas, dict):
+            personas = {}
+        personas[name.strip()] = prompt
+        self.tool_config['personas'] = personas
+        self.tool_config['active_persona'] = name.strip()
+
     def get_enabled_tools(self):
         """Return a set of enabled tool names, or None to allow all tools."""
         enabled = self.tool_config.get('enabled_tools') if isinstance(self.tool_config, dict) else None
@@ -47,6 +79,18 @@ class ProjectManager:
             value = settings.get(tool_name, {})
             return value if isinstance(value, dict) else {}
         return {}
+
+    def get_editing_settings(self):
+        """Return editing settings dict for project (e.g., selection defaults)."""
+        if not isinstance(self.tool_config, dict):
+            return {}
+        editing = self.tool_config.get('editing_settings', {})
+        return editing if isinstance(editing, dict) else {}
+
+    def set_editing_settings(self, editing_dict):
+        """Replace editing settings in memory with provided dict."""
+        if isinstance(editing_dict, dict):
+            self.tool_config['editing_settings'] = editing_dict
 
     def set_enabled_tools(self, enabled_list):
         """Update in-memory enabled tools list (None allows all)."""
