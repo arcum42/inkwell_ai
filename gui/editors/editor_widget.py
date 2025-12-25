@@ -7,6 +7,7 @@ from PySide6.QtGui import QDesktopServices
 
 from .document_viewer import DocumentWidget
 from .image_viewer import ImageViewerWidget
+from .search_replace import SearchReplaceWidget
 
 class EditorWidget(QWidget):
     """Tab-based editor widget managing multiple documents and images."""
@@ -26,6 +27,12 @@ class EditorWidget(QWidget):
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self.layout.addWidget(self.tabs)
+        
+        # Add search/replace widget
+        self.search_replace = SearchReplaceWidget(self)
+        self.search_replace.hide()
+        self.search_replace.close_requested.connect(self.hide_search)
+        self.layout.addWidget(self.search_replace)
         
         self.open_files = {}  # path -> widget
         self.project_path = None  # Track project root for relative path resolution
@@ -242,3 +249,15 @@ class EditorWidget(QWidget):
                 self.open_files[new_widget_path] = widget
                 updated = True
         return updated
+
+    def show_search(self):
+        """Show and focus the search/replace widget."""
+        editor = self.get_current_editor()
+        if editor:
+            self.search_replace.set_editor(editor)
+            self.search_replace.show()
+            self.search_replace.focus_search()
+
+    def hide_search(self):
+        """Hide the search/replace widget."""
+        self.search_replace.hide()

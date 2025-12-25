@@ -76,6 +76,13 @@ class MenuBarManager:
         paste_action.triggered.connect(lambda: self.window.editor.paste())
         edit_menu.addAction(paste_action)
         
+        edit_menu.addSeparator()
+        
+        find_action = QAction("Find & Replace...", self.window)
+        find_action.setShortcut("Ctrl+H")
+        find_action.triggered.connect(lambda: self.window.editor.show_search())
+        edit_menu.addAction(find_action)
+        
     def _create_settings_menu(self):
         """Create Settings menu."""
         settings_menu = self.menu_bar.addMenu("Settings")

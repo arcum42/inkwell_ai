@@ -2,7 +2,7 @@
 
 import re
 from PySide6.QtWidgets import QPlainTextEdit, QMenu
-from PySide6.QtGui import QTextCursor, QTextFormat, QColor, QTextCharFormat, QUnderlineStyle
+from PySide6.QtGui import QTextCursor, QTextFormat, QColor, QTextCharFormat
 from PySide6.QtCore import Qt, QTimer
 
 from .dialogs import LinkDialog
@@ -58,7 +58,7 @@ class CodeEditor(QPlainTextEdit):
         
         # Create format for misspelled words (red wavy underline)
         misspelled_format = QTextCharFormat()
-        misspelled_format.setUnderlineStyle(QUnderlineStyle.WaveUnderline)
+        misspelled_format.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
         misspelled_format.setUnderlineColor(QColor(255, 0, 0))  # Red
         
         # Apply formatting to all misspelled words

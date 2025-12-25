@@ -31,8 +31,8 @@ class InkwellSpellChecker:
         }
         
         # Add common words and custom dictionary to spell-checker
-        self.spell_checker.word_probability.update({word: 1.0 for word in self.common_words})
-        self.spell_checker.word_probability.update({word: 1.0 for word in self.custom_dict.get_all_words()})
+        self.spell_checker.known(self.common_words)
+        self.spell_checker.known(self.custom_dict.get_all_words())
     
     def check_text(self, text: str) -> set[str]:
         """Check text for misspelled words.
@@ -91,7 +91,7 @@ class InkwellSpellChecker:
         """
         self.custom_dict.add_word(word)
         # Also add to spell-checker's known words
-        self.spell_checker.word_probability[word.lower()] = 1.0
+        self.spell_checker.known([word.lower()])
     
     def remove_word_from_custom_dict(self, word: str):
         """Remove word from custom dictionary.
@@ -101,8 +101,7 @@ class InkwellSpellChecker:
         """
         self.custom_dict.remove_word(word)
         # Also remove from spell-checker
-        if word.lower() in self.spell_checker.word_probability:
-            del self.spell_checker.word_probability[word.lower()]
+        self.spell_checker.word_list.discard(word.lower())
     
     def get_custom_words(self) -> list[str]:
         """Get all words in custom dictionary.
