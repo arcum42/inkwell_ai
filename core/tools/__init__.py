@@ -8,6 +8,7 @@ from .web_reader import WebReader
 from .web_search import WebSearcher
 from .wikipedia_tool import WikiTool
 from .image_search import ImageSearcher
+from .image_gen_tool import ImageGenTool
 from .registry import register_default_tools
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "WebSearcher",
     "WikiTool",
     "ImageSearcher",
+    "ImageGenTool",
     "register_default_tools",
 ]
 

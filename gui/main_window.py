@@ -540,8 +540,12 @@ class MainWindow(QMainWindow):
             self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant. Help users with their fiction, characters, worldbuilding, and storytelling.")
         )
         
+        # Check if image generation is enabled
+        enabled_tools = self.project_manager.get_enabled_tools()
+        image_gen_enabled = enabled_tools is None or "GENERATE_IMAGE" in enabled_tools
+        
         # Add comprehensive edit format instructions
-        system_prompt = base_system_prompt + (
+        edit_instructions = (
             "\n\n## Edit Formats\n"
             "Use PATCH for line-level edits or range replacements:\n"
             ":::PATCH path/to/file.md\n"
@@ -555,11 +559,18 @@ class MainWindow(QMainWindow):
             ":::UPDATE path/to/file.md\n"
             "Complete new file content...\n"
             ":::END:::\n"
-            "\n"
-            "Image generation:\n"
-            ":::GENERATE_IMAGE:::\n"
-            "Prompt: Description...\n"
-            ":::END:::\n"
+        )
+        
+        if image_gen_enabled:
+            edit_instructions += (
+                "\n"
+                "Image generation:\n"
+                ":::GENERATE_IMAGE:::\n"
+                "Prompt: Description...\n"
+                ":::END:::\n"
+            )
+        
+        edit_instructions += (
             "\n"
             "CRITICAL RULES:\n"
             "- ALWAYS use :::PATCH::: or :::UPDATE::: directives for file edits\n"
@@ -570,6 +581,8 @@ class MainWindow(QMainWindow):
             "- Explanations can come AFTER the directive block\n"
             "- When editing selections repeatedly, continue using :::PATCH::: format for each edit\n"
         )
+        
+        system_prompt = base_system_prompt + edit_instructions
             
         # Add Active File Context based on context level
         active_path, active_content = self.editor.get_current_file()

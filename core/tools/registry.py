@@ -7,6 +7,7 @@ from .web_reader import WebReader
 from .web_search import WebSearcher
 from .wikipedia_tool import WikiTool
 from .image_search import ImageSearcher
+from .image_gen_tool import ImageGenTool
 
 # Map of tool names to their classes for conditional registration
 AVAILABLE_TOOLS: Dict[str, Type[Tool]] = {
@@ -14,6 +15,7 @@ AVAILABLE_TOOLS: Dict[str, Type[Tool]] = {
     "SEARCH": WebSearcher,
     "WIKI": WikiTool,
     "IMAGE": ImageSearcher,
+    "GENERATE_IMAGE": ImageGenTool,
 }
 
 
