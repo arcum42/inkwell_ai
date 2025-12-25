@@ -23,6 +23,8 @@ import difflib
 from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
 from gui.dialogs.image_dialog import ImageSelectionDialog
 import shutil
+from core.tools import register_default_tools
+from core.tools.registry import register_by_names
 
 
 def estimate_tokens(text: str) -> int:
@@ -1875,6 +1877,15 @@ class MainWindow(QMainWindow):
 
     def open_project(self, folder_path):
         if self.project_manager.open_project(folder_path):
+            # Configure tool registry based on project settings
+            try:
+                enabled = self.project_manager.get_enabled_tools()
+                if enabled is None:
+                    register_default_tools()
+                else:
+                    register_by_names(enabled)
+            except Exception:
+                pass
             self.sidebar.set_root_path(folder_path)
             self.setWindowTitle(f"Inkwell AI - {folder_path}")
             self.stack.setCurrentWidget(self.main_interface)
@@ -2064,6 +2075,15 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
         if dialog.exec():
+            # Re-register tools based on updated project settings
+            try:
+                enabled = self.project_manager.get_enabled_tools()
+                if enabled is None:
+                    register_default_tools()
+                else:
+                    register_by_names(enabled)
+            except Exception:
+                pass
             # After settings are saved, refresh model controls
             self.update_model_controls()
 

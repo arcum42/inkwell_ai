@@ -18,6 +18,7 @@ from PySide6.QtCore import QSettings
 from core.tool_base import get_registry
 # Ensure tools are loaded and registered
 import core.tools  # noqa: F401
+from core.tools.registry import AVAILABLE_TOOLS
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -103,7 +104,13 @@ class SettingsDialog(QDialog):
         if proj and proj.get_root_path():
             enabled_set = proj.get_enabled_tools()
         
-        for tool in self.registry.get_all_tools():
+        # Build list from all known tool classes, not just currently registered
+        for tool_cls in AVAILABLE_TOOLS.values():
+            try:
+                tool = tool_cls()
+            except Exception:
+                # Skip tools that cannot be constructed for UI listing
+                continue
             # Tool checkbox
             label = tool.name
             if not tool.is_available():
@@ -233,8 +240,15 @@ class SettingsDialog(QDialog):
                 if cb.isEnabled() and cb.isChecked():
                     enabled.append(name)
             # If all available tools are checked, we allow None (all)
-            all_names = [t.name for t in self.registry.get_available_tools()]
-            if set(enabled) == set(all_names):
+            available_names = []
+            for cls in AVAILABLE_TOOLS.values():
+                try:
+                    t = cls()
+                except Exception:
+                    continue
+                if t.is_available():
+                    available_names.append(t.name)
+            if set(enabled) == set(available_names):
                 proj.set_enabled_tools(None)
             else:
                 proj.set_enabled_tools(enabled)
