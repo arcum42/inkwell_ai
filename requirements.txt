@@ -6,6 +6,7 @@ lmstudio
 chromadb
 sentence-transformers
 websocket-client
+pyspellchecker
 
 beautifulsoup4
 ddgs

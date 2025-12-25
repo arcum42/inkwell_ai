@@ -15,10 +15,11 @@ class EditorWidget(QWidget):
     batch_edit_requested = Signal(str, str)  # path, content
     tab_closed = Signal()  # Emits when a tab is closed
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, spell_checker=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
+        self.spell_checker = spell_checker
         
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -43,7 +44,8 @@ class EditorWidget(QWidget):
         if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
             widget = ImageViewerWidget(path)
         else:
-            widget = DocumentWidget(path, content if content is not None else "", self.project_path)
+            widget = DocumentWidget(path, content if content is not None else "", self.project_path, 
+                                   spell_checker=self.spell_checker)
             widget.link_clicked.connect(self.handle_link_click)
             widget.modification_changed.connect(lambda m: self.on_doc_modified(widget, m))
             widget.batch_edit_requested.connect(self.propagate_batch_edit)

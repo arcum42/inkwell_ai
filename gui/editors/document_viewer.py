@@ -17,10 +17,11 @@ class DocumentWidget(QWidget):
     modification_changed = Signal(bool)  # Emits when modified state changes
     batch_edit_requested = Signal(str, str)  # Emits (path, content)
 
-    def __init__(self, file_path, content, base_dir=None, parent=None):
+    def __init__(self, file_path, content, base_dir=None, spell_checker=None, parent=None):
         super().__init__(parent)
         self.file_path = file_path
         self.base_dir = base_dir  # Project root for resolving relative paths
+        self.spell_checker = spell_checker
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
@@ -49,8 +50,8 @@ class DocumentWidget(QWidget):
         # Stack for Edit/Preview
         self.stack = QStackedWidget()
         
-        # Editor
-        self.editor = CodeEditor()
+        # Editor with spell-checking
+        self.editor = CodeEditor(spell_checker=spell_checker)
         self.editor.setPlainText(content)
         self.editor.document().setModified(False)  # Reset initial state
         self.editor.document().modificationChanged.connect(self.on_modification_changed)
