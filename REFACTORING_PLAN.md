@@ -403,7 +403,7 @@ core/orchestration/
 - [x] Identify and extract all test files to separate location
 - [x] Documentation: [PHASE1_COMPLETION.md](PHASE1_COMPLETION.md)
 
-### Phase 2: Core Components (Weeks 2-3)
+### Phase 2: Core Components (Weeks 2-3) ✅ COMPLETED
 - [x] Refactor `core/rag_engine.py` into `core/rag/` module ✅ COMPLETED
   - [x] Backup created: `core/rag_engine.py.backup_pre_refactor_v1`
   - [x] Extract chunking module → `core/rag/chunking.py`
@@ -423,10 +423,15 @@ core/orchestration/
   - [x] Maintain backward compatibility with wrapper
   - [x] Create completion doc: `PHASE2B_COMPLETION_LLM.md`
   - [x] Import tests pass (both old and new paths)
-- [ ] Refactor `core/tools.py` into `core/tools/` module (IN PROGRESS)
-  - [ ] Backup first: `cp core/tools.py core/tools.py.backup_pre_refactor_v1`
-  - [ ] Organize by tool type
-  - [ ] Create registry
+- [x] Refactor `core/tools.py` into `core/tools/` module ✅ COMPLETED
+  - [x] Backup created: `core/tools.py.backup_pre_refactor_v1`
+  - [x] Organize by tool type → `web_reader.py`, `web_search.py`, `wikipedia_tool.py`, `image_search.py`, `image_gen_tool.py`
+  - [x] Create shared utilities → `util.py` (DDG helpers, HTML cleaning)
+  - [x] Create registry helpers → `registry.py` (clear, list, selective registration)
+  - [x] Wire to project settings → Settings dialog controls, main_window applies on open/save
+  - [x] Maintain backward compatibility with wrapper
+  - [x] Create completion doc: `PHASE2C_COMPLETION_TOOLS.md`
+  - [x] Runtime tests confirm registration and tool execution
 
 ### Phase 3: UI Components (Weeks 4-5)
 - [ ] Refactor `gui/editor.py` into `gui/editors/` module
@@ -596,16 +601,18 @@ ls -lh *.backup_pre_refactor_v1
 
 ## Summary Table
 
-| File | Size | Priority | Effort | Impact |
-|------|------|----------|--------|--------|
-| `gui/main_window.py` | 2,613 | 🔴 CRITICAL | High | Very High |
-| `core/rag_engine.py` | 921 | 🟠 HIGH | Medium | High |
-| `gui/editor.py` | 605 | 🟠 HIGH | Medium | High |
-| `core/tools.py` | 303 | 🟡 MEDIUM | Low | Medium |
-| `core/llm_provider.py` | 292 | 🟡 MEDIUM | Low | Medium |
-| `gui/workers.py` | 262 | 🟡 MEDIUM | Low | Low |
+| File | Size | Priority | Status | Effort | Impact |
+|------|------|----------|--------|--------|--------|
+| `gui/main_window.py` | 2,647 | 🔴 CRITICAL | 📋 Not Started | High | Very High |
+| `core/rag_engine.py` | 921→ | 🟠 HIGH | ✅ Complete | Medium | High |
+| `gui/editor.py` | 605 | 🟠 HIGH | 📋 Not Started | Medium | High |
+| `core/tools.py` | 303→ | 🟡 MEDIUM | ✅ Complete | Low | Medium |
+| `core/llm_provider.py` | 292→ | 🟡 MEDIUM | ✅ Complete | Low | Medium |
+| `gui/workers.py` | 263 | 🟡 MEDIUM | 📋 Not Started | Low | Low |
 
-**Estimated Total Effort:** 4-6 weeks for complete refactoring with testing
+**Progress:** Phase 2 Complete (3/3) | Phase 3: 0/2 | Phase 4: 0/1
+
+**Estimated Remaining Effort:** 2-3 weeks for UI components + main window refactoring
 
 **Expected Outcome:** Cleaner codebase with 20-30% more files but 50% better organization and maintainability.
 
