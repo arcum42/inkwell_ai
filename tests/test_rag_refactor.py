@@ -1,26 +1,16 @@
 #!/usr/bin/env python
-"""Test that RAG refactoring maintains backward compatibility."""
+"""Pytest: verify RAG refactor maintains backward compatibility."""
 
-import sys
-
-try:
-    # Test new import path
+def test_rag_import_paths():
+    """Both new and legacy import paths should resolve to the same class."""
     from core.rag import RAGEngine, MarkdownChunker, QueryCache, ContextOptimizer
-    print("✓ New import path (core.rag) works")
-    
-    # Test backward compatibility import path
     from core.rag_engine import RAGEngine as RAGEngineCompat
-    print("✓ Backward compatibility import (core.rag_engine) works")
-    
-    # Verify they're the same class
-    assert RAGEngine is RAGEngineCompat, "Classes should be identical"
-    print("✓ Both imports reference the same class")
-    
-    print("\nAll import tests passed!")
-    sys.exit(0)
-    
-except Exception as e:
-    print(f"✗ Import test failed: {e}", file=sys.stderr)
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+
+    # Basic existence checks for auxiliary classes
+    assert RAGEngine is not None
+    assert MarkdownChunker is not None
+    assert QueryCache is not None
+    assert ContextOptimizer is not None
+
+    # Backward compatibility: class identity must match
+    assert RAGEngine is RAGEngineCompat
