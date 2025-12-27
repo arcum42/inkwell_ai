@@ -273,6 +273,12 @@ class ChatWidget(QWidget):
         self.schema_combo.currentIndexChanged.connect(self.on_schema_changed)
         schema_layout.addWidget(self.schema_combo, 1)
 
+        # Structured toggle indicator
+        self.structured_indicator = QLabel()
+        self.structured_indicator.setStyleSheet("font-size: 9pt; color: #555;")
+        self._update_structured_indicator()
+        schema_layout.addWidget(self.structured_indicator)
+
         self.layout.addLayout(schema_layout)
         
         # Mode Selector
@@ -409,6 +415,7 @@ class ChatWidget(QWidget):
             self.provider_changed.emit(provider_name)
             # Re-populate schema list for the selected provider
             self._populate_schema_dropdown(provider_name)
+            self._update_structured_indicator()
     
     def on_model_changed(self, index):
         """Emit signal when model changes (gets actual model name from combo box data)."""
@@ -481,6 +488,7 @@ class ChatWidget(QWidget):
         settings = QSettings("InkwellAI", "InkwellAI")
         settings.setValue("structured_schema_id", sid or "None")
         self.schema_changed.emit(sid or "None")
+        self._update_structured_indicator()
 
     def _populate_schema_dropdown(self, provider_display: str | None = None):
         """Fill schema dropdown based on provider support and stored selection."""
@@ -522,6 +530,20 @@ class ChatWidget(QWidget):
                 self.schema_combo.setCurrentIndex(i)
                 break
         self.schema_combo.blockSignals(False)
+
+    def _update_structured_indicator(self):
+        settings = QSettings("InkwellAI", "InkwellAI")
+        enabled = bool(settings.value("structured_enabled", False, type=bool))
+        sid = settings.value("structured_schema_id", "None")
+        if enabled and sid and sid != "None":
+            self.structured_indicator.setText(f"Structured: {sid}")
+            self.structured_indicator.setStyleSheet("font-size: 9pt; color: #2a7;")
+        elif enabled:
+            self.structured_indicator.setText("Structured: None")
+            self.structured_indicator.setStyleSheet("font-size: 9pt; color: #885;")
+        else:
+            self.structured_indicator.setText("Structured: Off")
+            self.structured_indicator.setStyleSheet("font-size: 9pt; color: #555;")
 
     def on_anchor_clicked(self, url):
         url_str = url.toString()

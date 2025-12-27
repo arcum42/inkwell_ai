@@ -12,6 +12,7 @@ import os
 import re
 import uuid
 import hashlib
+import html as _html
 from PySide6.QtWidgets import QMessageBox, QFileDialog
 from PySide6.QtCore import QSettings
 
@@ -69,6 +70,11 @@ class ChatController:
         self._prune_prior_context_from_history()
 
         print(f"DEBUG: Context level for this message: {self.context_level}")
+        # Debug structured injection
+        if self._maybe_handle_structured_debug(message):
+            # Also display the user command in chat
+            self.window.chat.append_message("User", message)
+            return
         self.chat_history.append({"role": "user", "content": message})
         self._last_progress_note = None
         
@@ -522,7 +528,7 @@ class ChatController:
                     display = self._render_structured_payload(parsed, schema_id)
                     badge = f"<i>Structured ({schema_id}) — {'valid' if valid else 'unvalidated'}.</i>"
                     if validation_error:
-                        badge = f"<i>Structured ({schema_id}) — validation failed: {html_escape(str(validation_error))}</i>"
+                        badge = f"<i>Structured ({schema_id}) — validation failed: {_html.escape(str(validation_error))}</i>"
                     # Add to chat history and display immediately
                     self.chat_history.append({"role": "assistant", "content": display})
                     self.save_current_chat_session()
@@ -937,6 +943,38 @@ class ChatController:
         self._last_selection_info = None
         
         self.window.statusBar().showMessage("Started new chat (previous chat saved to history)", 3000)
+
+    def _maybe_handle_structured_debug(self, message: str) -> bool:
+        """Intercept debug commands to inject structured payloads without provider.
+        Returns True if handled.
+        Commands:
+          /structured_demo diff  -> emits a sample diff_patch payload
+          /structured_json <json> -> treats remainder as JSON payload
+        """
+        try:
+            if message.strip().startswith("/structured_demo"):
+                parts = message.strip().split()
+                kind = parts[1] if len(parts) > 1 else "diff"
+                if kind == "diff":
+                    payload = {
+                        "summary": "Update README and fix typos",
+                        "edits": [
+                            {"path": "README.md", "after": "# Project\n\nUpdated content..."},
+                            {"path": "docs/notes.md", "after": "Notes updated."}
+                        ],
+                        "warnings": ["Review changes before applying."],
+                    }
+                    import json
+                    self.on_chat_response(json.dumps(payload))
+                    return True
+                return False
+            if message.strip().startswith("/structured_json "):
+                raw = message.strip()[len("/structured_json "):]
+                self.on_chat_response(raw)
+                return True
+        except Exception:
+            pass
+        return False
 
     def handle_regenerate(self):
         """Regenerate the last assistant response."""
