@@ -98,6 +98,9 @@ class ProjectController:
             self.index_progress_state = (0, 0, "")
             self.window._update_token_dashboard()
             
+            # Reinitialize diff system with new project root
+            self.window.chat_controller.reinit_diff_system()
+            
             # Show progress bar
             self.window.indexing_progress = QProgressBar()
             self.window.indexing_progress.setTextVisible(True)

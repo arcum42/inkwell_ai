@@ -18,9 +18,13 @@ from PySide6.QtCore import QSettings
 
 from gui.workers import ChatWorker, ToolWorker, BatchWorker
 from gui.dialogs.diff_dialog import DiffDialog
+from gui.dialogs.batch_diff_dialog import BatchDiffDialog
 from gui.dialogs.chat_history_dialog import ChatHistoryDialog
 from gui.dialogs.image_dialog import ImageSelectionDialog
 from gui.editor import DocumentWidget, ImageViewerWidget
+from core.diff_engine import EditBatch, FileEdit
+from core.diff_parser import DiffParser
+from core.path_resolver import PathResolver
 
 
 def estimate_tokens(text: str) -> int:
@@ -46,7 +50,8 @@ class ChatController:
         self.window = main_window
         self.settings = QSettings("InkwellAI", "InkwellAI")
         self.chat_history = []  # List of {"role": "user/assistant", "content": "..."}
-        self.pending_edits = {}  # id -> (path, content)
+        self.pending_edits = {}  # id -> (path, content) - legacy single edits
+        self.pending_edit_batches = {}  # batch_id -> EditBatch - new batch system
         self._raw_ai_responses = []  # Track raw AI responses before parsing
         self._last_selection_info = None  # Store selection context
         self._last_token_usage = None
@@ -56,6 +61,37 @@ class ChatController:
         self.tool_worker = None
         self.batch_worker = None
         self._last_progress_note = None
+        
+        # Initialize diff parser and path resolver
+        self._diff_parser = None
+        self._path_resolver = None
+        self._init_diff_system()
+    
+    def _init_diff_system(self):
+        """Initialize the diff parsing system."""
+        if self.window.project_manager.root_path:
+            self._path_resolver = PathResolver(self.window.project_manager.root_path)
+            self._diff_parser = DiffParser(self._path_resolver, self.window.project_manager)
+            print(f"DEBUG: Diff system initialized with project root: {self.window.project_manager.root_path}")
+        else:
+            print("DEBUG: Cannot initialize diff system - no project root")
+    
+    def reinit_diff_system(self):
+        """Reinitialize diff system after project change.
+        
+        Call this when a new project is opened.
+        """
+        self._init_diff_system()
+    
+    def _use_batch_mode(self) -> bool:
+        """Check if batch diff mode is enabled.
+        
+        Returns:
+            True if batch mode should be used
+        """
+        enabled = self.settings.value("use_batch_diff_dialog", True, type=bool)
+        print(f"DEBUG: Batch mode enabled: {enabled}, diff_parser exists: {self._diff_parser is not None}")
+        return enabled
         
     def handle_chat_message(self, message):
         """Handle incoming chat message from user.
@@ -616,17 +652,7 @@ class ChatController:
             print("DEBUG: ASK MODE - Skipping patch parsing, returning response as plain markdown")
             return response
         
-        # Capture any edit:XYZ ids already present in the response
-        provided_edit_ids = re.findall(r"edit:([0-9a-fA-F-]{6,})", response)
-        seen_ids = set()
-        provided_edit_ids = [eid for eid in provided_edit_ids if not (eid in seen_ids or seen_ids.add(eid))]
-
-        def next_edit_id() -> str:
-            if provided_edit_ids:
-                return provided_edit_ids.pop(0)
-            return str(uuid.uuid4())
-        
-        # Check for tool execution requests
+        # Check for tool execution requests first
         tool_pattern = r":::TOOL:(.*?):(.*?):::"
         tool_match = re.search(tool_pattern, response)
         if tool_match:
@@ -644,6 +670,92 @@ class ChatController:
             self.tool_worker.finished.connect(self.on_tool_finished)
             self.tool_worker.start()
             return response  # Stop further processing
+        
+        # Use new batch parsing system if enabled and diff parser is available
+        if self._use_batch_mode() and self._diff_parser:
+            return self._parse_with_batch_system(response)
+        
+        # Fall back to legacy parsing
+        return self._parse_with_legacy_system(response)
+    
+    def _parse_with_batch_system(self, response: str) -> str:
+        """Parse response using new DiffParser and create EditBatch.
+        
+        Args:
+            response: Raw LLM response
+            
+        Returns:
+            Formatted response with batch edit link
+        """
+        print(f"DEBUG: _parse_with_batch_system called, diff_parser={self._diff_parser is not None}")
+        
+        try:
+            # Get active file for context
+            active_file = None
+            try:
+                active_file = self.window.editor.get_current_file()[0]
+            except Exception:
+                pass
+            
+            print(f"DEBUG: Parsing response (len={len(response)}) with active_file={active_file}")
+            
+            # Parse response into EditBatch
+            batch = self._diff_parser.parse_response(response, active_file)
+            
+            print(f"DEBUG: Parsed batch with {len(batch.edits)} edits")
+            
+            if not batch.edits:
+                # No edits found, return original response
+                print("DEBUG: No edits found in response")
+                return response
+            
+            # Store batch
+            batch_id = batch.batch_id
+            self.pending_edit_batches[batch_id] = batch
+            
+            # Create batch link
+            files_affected = batch.total_files_affected()
+            total_edits = len(batch.edits)
+            
+            # Remove any existing edit markers from response to avoid clutter
+            clean_response = response
+            for marker in [":::UPDATE", ":::PATCH", ":::END:::", "```diff"]:
+                if marker in clean_response:
+                    # Keep context around markers but make them less prominent
+                    pass  # For now, keep original response
+            
+            # Append batch link
+            batch_link = f'\n\n<br><b><a href="batch:{batch_id}">📝 Review {total_edits} Changes to {files_affected} Files</a></b><br>\n'
+            
+            print(f"DEBUG: Created batch {batch_id} with {total_edits} edits affecting {files_affected} files")
+            
+            return response + batch_link
+            
+        except Exception as e:
+            print(f"ERROR: Failed to parse with batch system: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fall back to legacy system on error
+            return self._parse_with_legacy_system(response)
+    
+    def _parse_with_legacy_system(self, response: str) -> str:
+        """Parse response using legacy individual edit system.
+        
+        Args:
+            response: Raw LLM response
+            
+        Returns:
+            Formatted response with individual edit links
+        """
+        # Capture any edit:XYZ ids already present in the response
+        provided_edit_ids = re.findall(r"edit:([0-9a-fA-F-]{6,})", response)
+        seen_ids = set()
+        provided_edit_ids = [eid for eid in provided_edit_ids if not (eid in seen_ids or seen_ids.add(eid))]
+
+        def next_edit_id() -> str:
+            if provided_edit_ids:
+                return provided_edit_ids.pop(0)
+            return str(uuid.uuid4())
 
         processing_response = response
         
@@ -872,6 +984,44 @@ class ChatController:
                     out.append("**Citations**\n\n" + "\n".join(cits))
                 return "\n\n".join(out)
             if schema_id == 'diff_patch':
+                print(f"DEBUG: Processing diff_patch schema, batch_mode={self._use_batch_mode()}, diff_parser={self._diff_parser is not None}")
+                
+                # Use new batch system if enabled
+                if self._use_batch_mode() and self._diff_parser:
+                    try:
+                        print("DEBUG: Attempting to parse structured diff_patch with batch system")
+                        batch = self._diff_parser.parse_structured_json(payload, schema_id)
+                        print(f"DEBUG: Parsed structured JSON into batch with {len(batch.edits)} edits")
+                        
+                        if batch.edits:
+                            batch_id = batch.batch_id
+                            self.pending_edit_batches[batch_id] = batch
+                            
+                            files_affected = batch.total_files_affected()
+                            total_edits = len(batch.edits)
+                            
+                            summary = payload.get('summary', '')
+                            warnings = payload.get('warnings', [])
+                            
+                            out = []
+                            if summary:
+                                out.append(f"**Summary**\n\n{summary}")
+                            
+                            out.append(f'\n<br><b><a href="batch:{batch_id}">📝 Review {total_edits} Changes to {files_affected} Files</a></b><br>')
+                            
+                            if warnings:
+                                out.append("**Warnings**\n\n" + "\n".join(warnings))
+                            
+                            print(f"DEBUG: Created batch link for {total_edits} edits")
+                            return "\n\n".join(out)
+                    except Exception as e:
+                        print(f"ERROR: Failed to parse structured diff_patch: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fall through to legacy handling
+                
+                print("DEBUG: Using legacy diff_patch handling")
+                # Legacy handling
                 summary = payload.get('summary')
                 edits = payload.get('edits') or []
                 warnings = payload.get('warnings') or []
@@ -1225,8 +1375,14 @@ class ChatController:
         """Handle link clicks in chat (edit proposals).
         
         Args:
-            url: Clicked URL (edit:ID format)
+            url: Clicked URL (edit:ID or batch:ID format)
         """
+        # Handle batch edit links (new system)
+        if url.startswith("batch:"):
+            self._handle_batch_link(url)
+            return
+        
+        # Handle single edit links (legacy system)
         if url.startswith("edit:"):
             edit_id = url[5:]
             if edit_id in self.pending_edits:
@@ -1269,6 +1425,93 @@ class ChatController:
                         
                 # Remove from pending
                 del self.pending_edits[edit_id]
+    
+    def _handle_batch_link(self, url: str):
+        """Handle batch edit link click.
+        
+        Args:
+            url: Batch URL (batch:ID format)
+        """
+        batch_id = url[6:]  # Remove "batch:" prefix
+        
+        if batch_id not in self.pending_edit_batches:
+            QMessageBox.warning(self.window, "Batch Not Found", 
+                              f"Edit batch {batch_id} not found. It may have been applied or cleared.")
+            return
+        
+        batch = self.pending_edit_batches[batch_id]
+        
+        # Show batch diff dialog
+        dialog = BatchDiffDialog(batch, parent=self.window)
+        if dialog.exec():
+            # Apply enabled edits
+            enabled_edits = dialog.get_enabled_edits()
+            
+            if not enabled_edits:
+                QMessageBox.information(self.window, "No Changes", "No edits were selected to apply.")
+                return
+            
+            # Apply each enabled edit
+            applied_count = 0
+            failed_files = []
+            
+            for edit in enabled_edits:
+                try:
+                    self._apply_single_edit(edit)
+                    applied_count += 1
+                except Exception as e:
+                    failed_files.append(f"{edit.file_path}: {e}")
+                    print(f"ERROR: Failed to apply edit to {edit.file_path}: {e}")
+            
+            # Show results
+            if failed_files:
+                error_msg = f"Applied {applied_count} edits successfully.\n\nFailed to apply:\n"
+                error_msg += "\n".join(failed_files[:5])  # Show first 5 errors
+                if len(failed_files) > 5:
+                    error_msg += f"\n... and {len(failed_files) - 5} more"
+                QMessageBox.warning(self.window, "Partial Success", error_msg)
+            else:
+                self.window.statusBar().showMessage(
+                    f"Applied {applied_count} changes to {len(set(e.file_path for e in enabled_edits))} files - Press Ctrl+S to save",
+                    5000
+                )
+            
+            # Remove batch from pending
+            del self.pending_edit_batches[batch_id]
+    
+    def _apply_single_edit(self, edit: FileEdit):
+        """Apply a single FileEdit to the filesystem or editor.
+        
+        Args:
+            edit: FileEdit to apply
+            
+        Raises:
+            Exception if application fails
+        """
+        path = edit.file_path
+        new_content = edit.new_content
+        
+        # Resolve absolute path for lookup in open_files
+        if not os.path.isabs(path) and self.window.project_manager.root_path:
+            abs_path = os.path.join(self.window.project_manager.root_path, path)
+        else:
+            abs_path = path
+        
+        # Check if file is open in editor
+        widget = None
+        if path in self.window.editor.open_files:
+            widget = self.window.editor.open_files[path]
+        elif abs_path in self.window.editor.open_files:
+            widget = self.window.editor.open_files[abs_path]
+        
+        if widget and isinstance(widget, DocumentWidget):
+            # File is open - update editor
+            widget.replace_content_undoable(new_content)
+        else:
+            # File not open - save directly to disk
+            saved = self.window.project_manager.save_file(path, new_content)
+            if not saved:
+                raise IOError(f"Failed to save {path}")
 
     def _normalize_edit_path(self, raw_path: str, active_path: str | None) -> str:
         """Normalize and resolve file paths from AI output.

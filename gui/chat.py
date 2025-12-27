@@ -628,6 +628,13 @@ class ChatWidget(QWidget):
                 self.handle_copy_message(msg_index)
             except Exception:
                 pass
+        elif url_str.startswith("json:"):
+            try:
+                msg_id = url_str.split(":", 1)[1]
+                msg_index = int(msg_id)
+                self.handle_json_message(msg_index)
+            except Exception:
+                pass
         else:
             self.link_clicked.emit(url_str)
     
@@ -839,13 +846,6 @@ class ChatWidget(QWidget):
             cursor.movePosition(QtGui.QTextCursor.End)
             # Find last <hr> and select everything from the previous <hr> to the end
             search_text = '<div style="margin-bottom: 10px;" data-msg-index="' + str(prev_index) + '"'
-        elif url_str.startswith("json:"):
-            try:
-                msg_id = url_str.split(":", 1)[1]
-                msg_index = int(msg_id)
-                self.handle_json_message(msg_index)
-            except Exception:
-                pass
             cursor.movePosition(QtGui.QTextCursor.Start)
             cursor = doc.find(search_text, cursor)
             if not cursor.isNull():
