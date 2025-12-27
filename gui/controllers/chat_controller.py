@@ -512,6 +512,30 @@ class ChatController:
         
         print(f"DEBUG: Raw AI Response:\n{response}")
 
+        # Structured response handling: attempt JSON parse/validate and render
+        structured_enabled = bool(self.settings.value("structured_enabled", False, type=bool))
+        schema_id = self.settings.value("structured_schema_id", "None")
+        if structured_enabled and schema_id and schema_id != "None":
+            try:
+                parsed, valid, validation_error = self._parse_and_validate_structured(response, schema_id)
+                if parsed is not None:
+                    display = self._render_structured_payload(parsed, schema_id)
+                    badge = f"<i>Structured ({schema_id}) — {'valid' if valid else 'unvalidated'}.</i>"
+                    if validation_error:
+                        badge = f"<i>Structured ({schema_id}) — validation failed: {html_escape(str(validation_error))}</i>"
+                    # Add to chat history and display immediately
+                    self.chat_history.append({"role": "assistant", "content": display})
+                    self.save_current_chat_session()
+                    if self.window.chat.streaming_response:
+                        self.window.chat.finish_streaming_response(display, raw_text=response)
+                    else:
+                        # Show a small badge system message followed by the structured content
+                        self.window.chat.append_message("System", badge)
+                        self.window.chat.append_message("Assistant", display, raw_text=response)
+                    return
+            except Exception as e:
+                print(f"DEBUG: Structured handling failed, falling back to text: {e}")
+
         # Check for incomplete responses
         if not self.is_response_complete(response):
             print("DEBUG: Response appears incomplete, auto-continuing...")
@@ -696,6 +720,173 @@ class ChatController:
         display_response = self._strip_unknown_edit_links(display_response)
         
         return display_response
+
+    def _parse_and_validate_structured(self, response_text: str, schema_id: str):
+        """Attempt to parse response as JSON and validate against a schema.
+
+        Returns (parsed_obj, valid_bool, validation_error_or_None).
+        If parsing fails, tries a minimal repair by trimming trailing text and balancing braces/brackets.
+        """
+        import json
+        try:
+            data = json.loads(response_text)
+            # Validate if jsonschema available
+            valid = True
+            err = None
+            try:
+                from core.llm.schemas import get_schema
+                schema = get_schema(schema_id)
+                if schema:
+                    try:
+                        import jsonschema  # optional
+                        jsonschema.validate(instance=data, schema=schema)
+                        valid = True
+                    except ImportError:
+                        valid = True  # cannot validate without package
+                    except Exception as ve:
+                        valid = False
+                        err = ve
+            except Exception:
+                pass
+            return data, valid, err
+        except Exception:
+            # Try minimal repair
+            repaired = self._repair_json_string(response_text)
+            if repaired:
+                try:
+                    data = json.loads(repaired)
+                    valid = True
+                    err = None
+                    try:
+                        from core.llm.schemas import get_schema
+                        schema = get_schema(schema_id)
+                        if schema:
+                            try:
+                                import jsonschema
+                                jsonschema.validate(instance=data, schema=schema)
+                            except ImportError:
+                                pass
+                            except Exception as ve:
+                                valid = False
+                                err = ve
+                    except Exception:
+                        pass
+                    return data, valid, err
+                except Exception:
+                    return None, False, None
+            return None, False, None
+
+    def _repair_json_string(self, s: str) -> str | None:
+        """Attempt a simple repair for truncated JSON by trimming trailing text
+        and balancing braces/brackets. Returns repaired string or None.
+        """
+        s = s.strip()
+        # Find first JSON start
+        start_obj = s.find('{')
+        start_arr = s.find('[')
+        if start_obj == -1 and start_arr == -1:
+            return None
+        start = min([i for i in [start_obj, start_arr] if i != -1])
+        s = s[start:]
+        # Trim after last closing brace/bracket if present
+        last_close_obj = s.rfind('}')
+        last_close_arr = s.rfind(']')
+        last_close = max(last_close_obj, last_close_arr)
+        if last_close != -1:
+            candidate = s[:last_close + 1]
+        else:
+            candidate = s
+        # Balance braces/brackets
+        open_curly = candidate.count('{')
+        close_curly = candidate.count('}')
+        open_square = candidate.count('[')
+        close_square = candidate.count(']')
+        # Append needed closers
+        candidate += '}' * max(0, open_curly - close_curly)
+        candidate += ']' * max(0, open_square - close_square)
+        return candidate
+
+    def _render_structured_payload(self, payload: dict, schema_id: str) -> str:
+        """Render a structured payload to a human-readable text, and enqueue diffs.
+        For diff-like schemas, create pending edit links using existing flow.
+        """
+        try:
+            if schema_id == 'basic_answer':
+                ans = payload.get('answer', '')
+                notes = payload.get('notes')
+                out = f"**Answer**\n\n{ans}" if ans else ""
+                if notes:
+                    out += f"\n\n**Notes**\n\n{notes}"
+                return out or str(payload)
+            if schema_id == 'chat_split':
+                analysis = payload.get('analysis')
+                answer = payload.get('answer')
+                actions = payload.get('actions')
+                parts = []
+                if analysis:
+                    parts.append(f"**Analysis**\n\n{analysis}")
+                if answer:
+                    parts.append(f"**Answer**\n\n{answer}")
+                if actions:
+                    parts.append("**Actions**\n\n" + "\n".join(actions))
+                return "\n\n".join(parts) or str(payload)
+            if schema_id == 'tool_result':
+                req = payload.get('request')
+                res = payload.get('result')
+                cits = payload.get('citations') or []
+                import json
+                res_str = json.dumps(res, ensure_ascii=False, indent=2) if not isinstance(res, str) else res
+                out = []
+                if req:
+                    out.append(f"**Request**\n\n{req}")
+                out.append(f"**Result**\n\n{res_str}")
+                if cits:
+                    out.append("**Citations**\n\n" + "\n".join(cits))
+                return "\n\n".join(out)
+            if schema_id == 'diff_patch':
+                summary = payload.get('summary')
+                edits = payload.get('edits') or []
+                warnings = payload.get('warnings') or []
+                out = []
+                if summary:
+                    out.append(f"**Summary**\n\n{summary}")
+                # Create pending edits and links
+                active_path = None
+                try:
+                    active_path = self.window.editor.get_current_file()[0]
+                except Exception:
+                    pass
+                seen_ids = set()
+                for edit in edits:
+                    path = edit.get('path') or active_path or 'unknown.txt'
+                    after = edit.get('after') or ''
+                    # Non-text extension fallback
+                    ext = os.path.splitext(path)[1].lower()
+                    non_text_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
+                                           '.mp4', '.avi', '.mov', '.mp3', '.wav',
+                                           '.pdf', '.zip', '.tar', '.gz', '.exe', '.bin'}
+                    if ext in non_text_extensions:
+                        path = os.path.splitext(path)[0] + '.txt'
+                    # Normalize path similar to UPDATE handler
+                    path = self._normalize_edit_path(path, active_path)
+                    # Create id
+                    eid = str(uuid.uuid4())
+                    while eid in seen_ids:
+                        eid = str(uuid.uuid4())
+                    seen_ids.add(eid)
+                    self.pending_edits[eid] = (path, after)
+                    out.append(f"<b><a href=\"edit:{eid}\">Review Changes for {path}</a></b>")
+                if warnings:
+                    out.append("**Warnings**\n\n" + "\n".join(warnings))
+                return "\n\n".join(out)
+        except Exception as e:
+            print(f"DEBUG: Failed to render structured payload: {e}")
+        # Fallback to pretty JSON
+        try:
+            import json
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(payload)
     
     def _continue_response(self):
         """Automatically continue the previous response."""
