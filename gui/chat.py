@@ -727,6 +727,15 @@ class ChatWidget(QWidget):
                     self._scroll_to_bottom(force=True)
                 return
         
+        # Add JSON view link if raw_text looks like JSON
+        json_link = ""
+        try:
+            raw_sample = raw_text.strip() if raw_text else ""
+            if raw_sample.startswith("{") or raw_sample.startswith("["):
+                json_link = f'<a href="json:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-left: 10px;">🧩 JSON</a>'
+        except Exception:
+            pass
+
         # Choose display text based on view mode
         display_text = (raw_text or text) if self.raw_view else text
         
@@ -748,6 +757,7 @@ class ChatWidget(QWidget):
             <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
             <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
             <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📋 Copy</a>
+            {json_link}
         </div>
         '''
         
@@ -817,6 +827,13 @@ class ChatWidget(QWidget):
             cursor.movePosition(QtGui.QTextCursor.End)
             # Find last <hr> and select everything from the previous <hr> to the end
             search_text = '<div style="margin-bottom: 10px;" data-msg-index="' + str(prev_index) + '"'
+        elif url_str.startswith("json:"):
+            try:
+                msg_id = url_str.split(":", 1)[1]
+                msg_index = int(msg_id)
+                self.handle_json_message(msg_index)
+            except Exception:
+                pass
             cursor.movePosition(QtGui.QTextCursor.Start)
             cursor = doc.find(search_text, cursor)
             if not cursor.isNull():
@@ -961,6 +978,33 @@ class ChatWidget(QWidget):
         clipboard = QtGui.QGuiApplication.clipboard()
         clipboard.setText(text, QClipboard.Clipboard)
         self.message_copied.emit("message")
+
+    def handle_json_message(self, msg_index):
+        """Show raw JSON of a message in a dialog, pretty-printed if possible."""
+        if msg_index >= len(self.messages):
+            return
+        raw = self.messages[msg_index][2] if len(self.messages[msg_index]) > 2 else self.messages[msg_index][1]
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+        import json
+        text = raw
+        try:
+            parsed = json.loads(raw)
+            text = json.dumps(parsed, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Raw JSON")
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        edit = QTextEdit()
+        edit.setPlainText(text)
+        edit.setReadOnly(True)
+        layout.addWidget(edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def on_raw_view_toggled(self, checked):
         """Toggle between normal and raw message view."""
