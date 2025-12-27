@@ -355,6 +355,8 @@ class MainWindow(QMainWindow):
             system_prompt,
             images=None,
             enabled_tools=self.project_manager.get_enabled_tools(),
+            structured_enabled=bool(self.settings.value("structured_enabled", False, type=bool)),
+            schema_id=self.settings.value("structured_schema_id", "None") if self.settings.value("structured_enabled", False, type=bool) else None,
         )
         self.worker.response_received.connect(self.chat_controller.on_chat_response)
         self.worker.start()

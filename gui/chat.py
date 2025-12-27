@@ -110,6 +110,7 @@ class ChatWidget(QWidget):
     refresh_models_requested = Signal()  # Request to refresh available models
     context_level_changed = Signal(str)  # Emits context level: "None", "Visible", "All", "Full"
     mode_changed = Signal(str)  # Emits mode: "ask" or "edit"
+    schema_changed = Signal(str)  # Emits schema id or "None"
     message_copied = Signal(str)  # Emits "message" or "chat" when copied
     persona_changed = Signal(str)  # Emits persona name when changed
 
@@ -257,6 +258,22 @@ class ChatWidget(QWidget):
         context_layout.addWidget(self.context_combo, 1)
         
         self.layout.addLayout(context_layout)
+
+        # Schema Selector (advanced)
+        schema_layout = QHBoxLayout()
+        schema_layout.setContentsMargins(0, 0, 0, 5)
+        schema_layout.setSpacing(5)
+
+        schema_label = QLabel("Schema:")
+        schema_label.setStyleSheet("font-size: 9pt;")
+        schema_layout.addWidget(schema_label)
+
+        self.schema_combo = QComboBox()
+        self._populate_schema_dropdown()
+        self.schema_combo.currentIndexChanged.connect(self.on_schema_changed)
+        schema_layout.addWidget(self.schema_combo, 1)
+
+        self.layout.addLayout(schema_layout)
         
         # Mode Selector
         mode_layout = QHBoxLayout()
@@ -390,6 +407,8 @@ class ChatWidget(QWidget):
         """Emit signal when provider changes."""
         if provider_name:
             self.provider_changed.emit(provider_name)
+            # Re-populate schema list for the selected provider
+            self._populate_schema_dropdown(provider_name)
     
     def on_model_changed(self, index):
         """Emit signal when model changes (gets actual model name from combo box data)."""
@@ -454,6 +473,55 @@ class ChatWidget(QWidget):
         mode = self.mode_combo.itemText(index).lower()
         self.current_mode = mode
         self.mode_changed.emit(mode)
+
+    def on_schema_changed(self, index):
+        """Persist schema selection and emit signal."""
+        sid = self.schema_combo.itemData(index)
+        # Store in settings for controller/worker use
+        settings = QSettings("InkwellAI", "InkwellAI")
+        settings.setValue("structured_schema_id", sid or "None")
+        self.schema_changed.emit(sid or "None")
+
+    def _populate_schema_dropdown(self, provider_display: str | None = None):
+        """Fill schema dropdown based on provider support and stored selection."""
+        try:
+            from core.llm.schemas import list_schemas
+        except Exception:
+            # If registry not available, show only None
+            self.schema_combo.clear()
+            self.schema_combo.addItem("None", None)
+            return
+
+        # Map display name to provider class name for allowlist filtering
+        provider_display = provider_display or self.provider_combo.currentText()
+        provider_map = {
+            "Ollama": "OllamaProvider",
+            "LM Studio (Native SDK)": "LMStudioNativeProvider",
+        }
+        provider_class = provider_map.get(provider_display)
+
+        self.schema_combo.blockSignals(True)
+        self.schema_combo.clear()
+        self.schema_combo.addItem("None", None)
+        entries = list_schemas(allowed_provider=provider_class) if provider_class else []
+        for entry in entries:
+            sid = entry.get('id')
+            desc = entry.get('description') or sid
+            label = f"{sid}"
+            if desc and desc != sid:
+                label = f"{sid} — {desc}"
+            self.schema_combo.addItem(label, sid)
+
+        # Restore previous selection from settings
+        settings = QSettings("InkwellAI", "InkwellAI")
+        saved = settings.value("structured_schema_id", "None")
+        # Find index by data
+        for i in range(self.schema_combo.count()):
+            data = self.schema_combo.itemData(i)
+            if (saved == "None" and data is None) or (data == saved):
+                self.schema_combo.setCurrentIndex(i)
+                break
+        self.schema_combo.blockSignals(False)
 
     def on_anchor_clicked(self, url):
         url_str = url.toString()

@@ -249,6 +249,8 @@ class ChatController:
             images=attached_images if is_vision else None,
             enabled_tools=enabled_tools,
             mode=self.chat_mode,
+            structured_enabled=bool(self.settings.value("structured_enabled", False, type=bool)),
+            schema_id=self.settings.value("structured_schema_id", "None") if self.settings.value("structured_enabled", False, type=bool) else None,
         )
         self.worker.response_thinking_start.connect(self.on_chat_thinking_start)
         self.worker.response_thinking_chunk.connect(self.on_chat_thinking_chunk)

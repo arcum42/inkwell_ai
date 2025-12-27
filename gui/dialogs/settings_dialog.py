@@ -532,6 +532,23 @@ class SettingsDialog(QDialog):
         )
         warning.setStyleSheet("color: #ff6b6b; font-weight: bold; padding: 10px;")
         layout.addWidget(warning)
+
+        # Structured Responses toggle
+        structured_group = QGroupBox("Structured Responses (JSON Schema)")
+        structured_layout = QVBoxLayout()
+        structured_desc = QLabel(
+            "Enable opt-in structured responses using JSON Schema. "
+            "Currently supported for LM Studio (Native SDK) only. "
+            "When enabled, you can choose a schema in chat advanced options."
+        )
+        structured_desc.setWordWrap(True)
+        structured_layout.addWidget(structured_desc)
+
+        self.structured_enabled_cb = QCheckBox("Enable structured responses")
+        self.structured_enabled_cb.setChecked(bool(self.settings.value("structured_enabled", False, type=bool)))
+        structured_layout.addWidget(self.structured_enabled_cb)
+        structured_group.setLayout(structured_layout)
+        layout.addWidget(structured_group)
         
         # Custom edit instructions
         instructions_group = QGroupBox("Custom Edit Instructions")
@@ -629,6 +646,9 @@ class SettingsDialog(QDialog):
         # Save custom edit instructions
         custom_instructions = self.custom_edit_instructions.toPlainText().strip()
         self.settings.setValue("custom_edit_instructions", custom_instructions)
+
+        # Save structured responses toggle
+        self.settings.setValue("structured_enabled", bool(self.structured_enabled_cb.isChecked()))
         
         # Save default image folder
         folder_value = self.default_image_folder.text().strip()
