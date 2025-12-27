@@ -11,6 +11,7 @@ class ChatWorker(QThread):
     response_thinking_start = Signal()  # Signal when model enters thinking phase
     response_thinking_chunk = Signal(str)  # Emit thinking tokens
     response_thinking_done = Signal()  # Signal when thinking phase ends
+    progress_update = Signal(str)  # Emit human-readable progress updates
 
     def __init__(self, provider, chat_history, model, context, system_prompt, images=None, enabled_tools=None, mode="edit"):
         super().__init__()
@@ -94,6 +95,34 @@ class ChatWorker(QThread):
             print(f"DEBUG: About to call provider with supports_streaming={self.provider.supports_streaming}")
             print(f"DEBUG: Provider type: {type(self.provider).__name__}")
             
+            def emit_progress(event):
+                if event is None:
+                    return
+                msg = None
+                if isinstance(event, dict):
+                    phase = event.get("phase")
+                    detail = event.get("detail")
+                    if phase == "connecting":
+                        msg = f"Connecting to LLM at {detail}..." if detail else "Connecting to LLM..."
+                    elif phase == "loading_model":
+                        msg = f"Loading model {detail}..." if detail else "Loading model..."
+                    elif phase == "model_ready":
+                        msg = f"Model {detail} ready." if detail else "Model ready."
+                    elif phase == "receiving":
+                        msg = "Receiving response..."
+                    elif phase == "complete":
+                        msg = "Response complete."
+                    elif phase == "error":
+                        msg = f"LLM error: {detail}" if detail else "LLM error."
+                    elif detail:
+                        msg = f"{phase}: {detail}"
+                    else:
+                        msg = str(phase)
+                else:
+                    msg = str(event)
+                if msg:
+                    self.progress_update.emit(msg)
+            
             # Check if provider supports streaming
             if self.provider.supports_streaming:
                 # Use streaming - provider has real streaming capability
@@ -116,7 +145,12 @@ class ChatWorker(QThread):
                             return len(m)
                     return 0
 
-                for raw_chunk in self.provider.chat_stream(messages, model=self.model):
+                try:
+                    stream_iter = self.provider.chat_stream(messages, model=self.model, progress_callback=emit_progress)
+                except TypeError:
+                    stream_iter = self.provider.chat_stream(messages, model=self.model)
+
+                for raw_chunk in stream_iter:
                     chunk = str(raw_chunk)
                     # Process markers to separate thinking vs final answer
                     text = chunk
@@ -166,7 +200,10 @@ class ChatWorker(QThread):
                 self.response_received.emit(full_response)
             else:
                 # Fall back to non-streaming
-                response = self.provider.chat(messages, model=self.model)
+                try:
+                    response = self.provider.chat(messages, model=self.model, progress_callback=emit_progress)
+                except TypeError:
+                    response = self.provider.chat(messages, model=self.model)
                 self.response_received.emit(response)
         except Exception as e:
             import traceback

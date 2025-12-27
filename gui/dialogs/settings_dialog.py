@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QSpinBox,
     QWidget,
+    QFontComboBox,
     QLabel,
     QTextEdit,
     QTabWidget,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
 )
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QFont
 from core.tool_base import get_registry
 # Ensure tools are loaded and registered
 import core.tools  # noqa: F401
@@ -71,8 +73,12 @@ class SettingsDialog(QDialog):
         
         # LLM Provider
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["Ollama", "LM Studio", "LM Studio (Native SDK)"])
+        self.provider_combo.addItems(["Ollama", "LM Studio (Native SDK)"])
         current_provider = self.settings.value("llm_provider", "Ollama")
+        # Map deprecated "LM Studio" to native SDK
+        if current_provider == "LM Studio":
+            current_provider = "LM Studio (Native SDK)"
+            self.settings.setValue("llm_provider", current_provider)
         self.provider_combo.setCurrentText(current_provider)
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         form_layout.addRow("LLM Provider:", self.provider_combo)
@@ -83,11 +89,11 @@ class SettingsDialog(QDialog):
         self.ollama_row = form_layout.rowCount()
         form_layout.addRow("Ollama URL:", self.ollama_url)
         
-        # LM Studio URL
+        # LM Studio URL (deprecated OpenAI-compatible)
         self.lm_studio_url = QLineEdit()
         self.lm_studio_url.setText(self.settings.value("lm_studio_url", "http://localhost:1234"))
         self.lm_studio_row = form_layout.rowCount()
-        form_layout.addRow("LM Studio URL:", self.lm_studio_url)
+        form_layout.addRow("LM Studio URL (deprecated):", self.lm_studio_url)
         
         # LM Studio Native SDK URL
         self.lm_studio_native_url = QLineEdit()
@@ -99,6 +105,17 @@ class SettingsDialog(QDialog):
         self.comfy_url = QLineEdit()
         self.comfy_url.setText(self.settings.value("comfy_url", "http://127.0.0.1:8188"))
         form_layout.addRow("ComfyUI URL:", self.comfy_url)
+        
+        # Font settings
+        self.font_family_combo = QFontComboBox()
+        default_font = self.settings.value("editor_font_family", "Monospace")
+        self.font_family_combo.setCurrentFont(QFont(default_font))
+        form_layout.addRow("Editor Font:", self.font_family_combo)
+        
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 32)
+        self.font_size_spin.setValue(int(self.settings.value("editor_font_size", 11)))
+        form_layout.addRow("Editor Font Size:", self.font_size_spin)
 
         # Default Image Save Folder
         self.default_image_folder = QLineEdit()
@@ -484,8 +501,9 @@ class SettingsDialog(QDialog):
         lm_native_label = self.form_layout.labelForField(self.lm_studio_native_url)
 
         is_ollama = (provider_name == "Ollama")
+        # Keep legacy name handling for backwards compatibility
         is_lm = (provider_name == "LM Studio")
-        is_lm_native = (provider_name == "LM Studio (Native SDK)")
+        is_lm_native = (provider_name == "LM Studio (Native SDK)") or is_lm
 
         # Toggle visibility for Ollama URL
         self.ollama_url.setVisible(is_ollama)
@@ -603,6 +621,10 @@ class SettingsDialog(QDialog):
         self.settings.setValue("lm_studio_url", self.lm_studio_url.text())
         self.settings.setValue("lm_studio_native_url", self.lm_studio_native_url.text())
         self.settings.setValue("comfy_url", self.comfy_url.text())
+        
+        # Save font settings
+        self.settings.setValue("editor_font_family", self.font_family_combo.currentFont().family())
+        self.settings.setValue("editor_font_size", self.font_size_spin.value())
         
         # Save custom edit instructions
         custom_instructions = self.custom_edit_instructions.toPlainText().strip()

@@ -1,8 +1,11 @@
 """LM Studio provider using native Python SDK."""
 
 import base64
+import time
+from typing import Optional, List, Callable, Any
+
 import lmstudio as lms
-from typing import Optional, List
+
 from .base import LLMProvider
 
 
@@ -28,6 +31,10 @@ class LMStudioNativeProvider(LLMProvider):
             base_url: Host:port of LM Studio API server (default: localhost:1234)
         """
         self.base_url = base_url
+        self._model_cache: List[str] = []
+        self._model_cache_ts: float = 0.0
+        self._loaded_cache: List[str] = []
+        self._loaded_cache_ts: float = 0.0
         # Configure default client if needed
         if base_url != "localhost:1234":
             lms.configure_default_client(base_url)
@@ -43,7 +50,7 @@ class LMStudioNativeProvider(LLMProvider):
         except Exception as e:
             print(f"Warning: Could not verify LM Studio connection: {e}")
     
-    def chat(self, messages: list, model: str = None) -> str:
+    def chat(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None) -> str:
         """Send chat message to LM Studio using native SDK.
         
         Args:
@@ -55,23 +62,34 @@ class LMStudioNativeProvider(LLMProvider):
             Response text from model
         """
         try:
+            self._emit_progress(progress_callback, "connecting", self.base_url)
+
             # Get model handle
             if model:
                 llm_model = lms.llm(model)
             else:
                 llm_model = lms.llm()  # Use currently loaded model
-            
+
+            loaded_state = self.is_model_loaded(model) if model else None
+            if loaded_state is False:
+                self._emit_progress(progress_callback, "loading_model", model)
+            elif loaded_state is True:
+                self._emit_progress(progress_callback, "model_ready", model)
+
             # Build chat context
             chat = self._build_chat_context(messages)
+            self._emit_progress(progress_callback, "sending")
             
             # Generate response
             result = llm_model.respond(chat)
+            self._emit_progress(progress_callback, "complete")
             return result.content
             
         except Exception as e:
+            self._emit_progress(progress_callback, "error", str(e))
             return f"Error: {e}"
     
-    def chat_stream(self, messages: list, model: str = None):
+    def chat_stream(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None):
         """Stream chat response token-by-token using native SDK.
         
         Uses the native SDK's respond_stream() method to yield fragments
@@ -86,22 +104,31 @@ class LMStudioNativeProvider(LLMProvider):
             Response text tokens as they are generated
         """
         try:
+            self._emit_progress(progress_callback, "connecting", self.base_url)
             # Get model handle
             if model:
                 llm_model = lms.llm(model)
             else:
                 llm_model = lms.llm()  # Use currently loaded model
+
+            loaded_state = self.is_model_loaded(model) if model else None
+            if loaded_state is False:
+                self._emit_progress(progress_callback, "loading_model", model)
+            elif loaded_state is True:
+                self._emit_progress(progress_callback, "model_ready", model)
             
             # Build chat context
             chat = self._build_chat_context(messages)
+            self._emit_progress(progress_callback, "receiving")
             
             # Stream response using native SDK
             for fragment in llm_model.respond_stream(chat):
-                # Fragment has .content attribute with text
                 content = fragment.content if hasattr(fragment, 'content') else str(fragment)
                 if content:
                     yield content
+            self._emit_progress(progress_callback, "complete")
         except Exception as e:
+            self._emit_progress(progress_callback, "error", str(e))
             yield f"Error: {e}"
     
     def _build_chat_context(self, messages: list):
@@ -162,15 +189,15 @@ class LMStudioNativeProvider(LLMProvider):
         
         return chat
     
-    def list_models(self) -> List[str]:
+    def list_models(self, refresh: bool = False) -> List[str]:
         """List available models from LM Studio.
         
         Returns:
             List of model names
         """
+        if not refresh and self._model_cache and (time.time() - self._model_cache_ts) < 15:
+            return list(self._model_cache)
         try:
-            # Fall back to REST API for model listing
-            # Native SDK docs don't clearly show how to list models yet
             import requests
             base = self._normalize_url(self.base_url)
             
@@ -180,14 +207,70 @@ class LMStudioNativeProvider(LLMProvider):
             
             models = []
             for m in data.get("data", []):
-                mid = m.get("id") or m.get("model")
+                mid = self._get_model_id(m)
                 if mid:
                     models.append(mid)
+            self._model_cache = models
+            self._model_cache_ts = time.time()
             return models
             
         except Exception as e:
             print(f"Error listing LM Studio models: {e}")
             return []
+
+    def get_loaded_models(self, refresh: bool = False) -> Optional[List[str]]:
+        """Return models currently loaded by LM Studio when available.
+        
+        Returns None when the status cannot be determined.
+        """
+        if not refresh and self._loaded_cache and (time.time() - self._loaded_cache_ts) < 10:
+            return list(self._loaded_cache)
+        try:
+            import requests
+            base = self._normalize_url(self.base_url)
+            response = requests.get(f"{base}/v1/models", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+
+            loaded: List[str] = []
+            for m in data.get("data", []):
+                mid = self._get_model_id(m)
+                if not mid:
+                    continue
+                meta = m if isinstance(m, dict) else {}
+                flags = [
+                    meta.get("loaded"),
+                    meta.get("isLoaded"),
+                    meta.get("is_loaded"),
+                    meta.get("isDefault"),
+                    meta.get("default"),
+                ]
+                state = str(meta.get("state") or meta.get("status") or "").lower()
+                if any(bool(f) for f in flags) or state in ("loaded", "ready", "active", "running"):
+                    loaded.append(mid)
+            if not loaded:
+                ids = [self._get_model_id(m) for m in data.get("data", []) if self._get_model_id(m)]
+                if len(ids) == 1:
+                    loaded = ids
+            self._loaded_cache = loaded
+            self._loaded_cache_ts = time.time()
+            return loaded
+        except Exception as e:
+            print(f"Error checking loaded LM Studio models: {e}")
+            return None
+
+    def is_model_loaded(self, model_name: Optional[str]) -> Optional[bool]:
+        """Check if a specific model appears loaded.
+        
+        Returns:
+            True if loaded, False if present but not loaded, None if unknown.
+        """
+        if not model_name:
+            return None
+        loaded_models = self.get_loaded_models()
+        if loaded_models is None:
+            return None
+        return model_name in loaded_models
     
     def get_model_context_length(self, model_name: str) -> Optional[int]:
         """Get context length for a model.
@@ -198,23 +281,32 @@ class LMStudioNativeProvider(LLMProvider):
         Returns:
             Context length in tokens, or None if unknown
         """
+        # 1) Try native SDK method (most accurate for currently loaded model)
         try:
-            # Use REST API for metadata until native SDK method is confirmed
+            llm_model = lms.llm(model_name) if model_name else lms.llm()
+            ctx_len = llm_model.get_context_length()
+            if ctx_len:
+                return int(ctx_len)
+        except Exception as e:
+            print(f"DEBUG: Native get_context_length failed, falling back to REST: {e}")
+        
+        # 2) Fallback to REST metadata
+        try:
             import requests
             base = self._normalize_url(self.base_url)
-            
+
             response = requests.get(f"{base}/v1/models", timeout=5)
             response.raise_for_status()
             data = response.json()
-            
+
             for m in data.get("data", []):
                 if m.get("id") == model_name or m.get("model") == model_name:
-                    return (m.get("max_model_len") or 
-                           m.get("context_length") or 
+                    return (m.get("max_model_len") or
+                           m.get("context_length") or
                            m.get("max_context_length") or
                            m.get("n_ctx"))
             return None
-            
+
         except Exception as e:
             print(f"Error getting model context length: {e}")
             return None
@@ -270,3 +362,23 @@ class LMStudioNativeProvider(LLMProvider):
             return base_url.rstrip("/")
         else:
             return f"http://{base_url}"
+
+    def _emit_progress(self, progress_callback: Optional[Callable[[Any], None]], phase: str, detail: Optional[str] = None):
+        if not progress_callback:
+            return
+        payload = {"phase": phase}
+        if detail:
+            payload["detail"] = detail
+        try:
+            progress_callback(payload)
+        except Exception:
+            try:
+                progress_callback(f"{phase}: {detail}" if detail else phase)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _get_model_id(entry: dict) -> Optional[str]:
+        if not isinstance(entry, dict):
+            return None
+        return entry.get("id") or entry.get("model") or entry.get("name")

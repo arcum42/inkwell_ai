@@ -207,17 +207,31 @@ class MainWindow(QMainWindow):
         """Delegate to ProjectController."""
         self.project_controller.update_welcome_screen()
 
-    def update_model_controls(self):
+    def update_model_controls(self, refresh: bool = False):
         """Update model controls with current settings and available models."""
         try:
             provider_name = self.settings.value("llm_provider", "Ollama")
+            if provider_name == "LM Studio":
+                provider_name = "LM Studio (Native SDK)"
+                self.settings.setValue("llm_provider", provider_name)
             provider = self.get_llm_provider()
             
             # Get available models
-            models = provider.list_models()
+            try:
+                models = provider.list_models(refresh=refresh)
+            except TypeError:
+                models = provider.list_models()
             
             # Determine which models support vision
             vision_models = [m for m in models if provider.is_vision_model(m)]
+            loaded_models = []
+            if hasattr(provider, "get_loaded_models"):
+                try:
+                    loaded = provider.get_loaded_models(refresh=refresh)
+                    if loaded:
+                        loaded_models = loaded
+                except Exception:
+                    loaded_models = []
             
             # Get current model based on provider
             if provider_name == "Ollama":
@@ -226,7 +240,7 @@ class MainWindow(QMainWindow):
                 current_model = self.settings.value("lm_studio_model", "default")
             
             # Update UI with vision model indicators
-            self.chat.update_model_info(provider_name, current_model, models, vision_models)
+            self.chat.update_model_info(provider_name, current_model, models, vision_models, loaded_models)
         except Exception as e:
             print(f"DEBUG: Failed to update model controls: {e}")
             # Set defaults
@@ -249,6 +263,10 @@ class MainWindow(QMainWindow):
             return
         
         provider_name = self.settings.value("llm_provider", "Ollama")
+        # Map deprecated LM Studio (OpenAI-compatible) to native
+        if provider_name == "LM Studio":
+            provider_name = "LM Studio (Native SDK)"
+            self.settings.setValue("llm_provider", provider_name)
         if provider_name == "Ollama":
             self.settings.setValue("ollama_model", raw_model)
         else:
@@ -256,7 +274,7 @@ class MainWindow(QMainWindow):
     
     def on_refresh_models(self):
         """Refresh available models from provider."""
-        self.update_model_controls()
+        self.update_model_controls(refresh=True)
     
     def on_persona_changed(self, persona_name):
         """Handle persona selection change."""
@@ -270,6 +288,10 @@ class MainWindow(QMainWindow):
 
     def get_llm_provider(self):
         provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "LM Studio":
+            # Deprecated selection maps to native SDK
+            provider_name = "LM Studio (Native SDK)"
+            self.settings.setValue("llm_provider", provider_name)
         if provider_name == "Ollama":
             url = self.settings.value("ollama_url", "http://localhost:11434")
             return OllamaProvider(base_url=url)
@@ -825,6 +847,10 @@ class MainWindow(QMainWindow):
             # After settings are saved, refresh model controls
             self.update_model_controls()
             
+            # Refresh font settings in editor and chat
+            self.editor.apply_font_settings()
+            self.chat.apply_font_settings()
+            
             # Refresh persona dropdown if project is open
             if self.project_manager.get_root_path():
                 personas = self.project_manager.get_all_personas()
@@ -1365,11 +1391,51 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Redid {op['type']}: {os.path.basename(src)} → {os.path.basename(dst)}", 3000)
 
     def _update_token_dashboard(self, token_usage=None, token_breakdown=None):
-        """Stub for token usage tracking (to be implemented)."""
-        # Store for potential future use
+        """Update the status bar token dashboard with latest counts.
+
+        Args:
+            token_usage: Aggregate token estimate for current request.
+            token_breakdown: Optional dict of component -> token estimate.
+        """
         if token_usage is not None:
             self._last_token_usage = token_usage
-        # TODO: Display token usage in UI (statusbar, dedicated widget, etc.)
-        pass
+
+        # Friendly formatting helpers
+        def fmt_num(n):
+            try:
+                return f"{int(n):,}"
+            except Exception:
+                return "--"
+
+        total_tokens = fmt_num(self._last_token_usage) if self._last_token_usage is not None else "--"
+
+        # Query cache stats (if RAG is initialized)
+        cache_text = "--"
+        try:
+            if self.rag_engine and hasattr(self.rag_engine, "query_cache"):
+                stats = self.rag_engine.query_cache.get_stats()
+                cache_text = f"H:{stats.get('hits', 0)} M:{stats.get('misses', 0)} I:{stats.get('invalidations', 0)} ({stats.get('hit_rate', '0%')})"
+        except Exception:
+            cache_text = "--"
+
+        # Index status (approximate: number of chunks tracked)
+        index_text = "idle"
+        try:
+            if self.rag_engine and getattr(self.rag_engine, "_all_chunks", None):
+                index_text = f"chunks: {len(self.rag_engine._all_chunks)}"
+        except Exception:
+            index_text = "idle"
+
+        self.token_status.setText(f"Tokens: {total_tokens}/-- | Cache: {cache_text} | Index: {index_text}")
+
+        # Tooltip with breakdown if provided
+        if token_breakdown:
+            try:
+                lines = [f"{k}: {fmt_num(v)}" for k, v in sorted(token_breakdown.items(), key=lambda kv: kv[0])]
+                self.token_status.setToolTip("\n".join(lines))
+            except Exception:
+                self.token_status.setToolTip("")
+        else:
+            self.token_status.setToolTip("")
 
 

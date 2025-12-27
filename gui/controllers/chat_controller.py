@@ -54,6 +54,7 @@ class ChatController:
         self.worker = None
         self.tool_worker = None
         self.batch_worker = None
+        self._last_progress_note = None
         
     def handle_chat_message(self, message):
         """Handle incoming chat message from user.
@@ -61,11 +62,21 @@ class ChatController:
         Args:
             message: User message text
         """
+        # Proactively prune any stale per-message context from prior history
+        # so each send reassesses and only includes the currently relevant files.
+        # This prevents previously injected Context/Citations blocks from
+        # lingering in earlier user messages and inflating the next request.
+        self._prune_prior_context_from_history()
+
         print(f"DEBUG: Context level for this message: {self.context_level}")
         self.chat_history.append({"role": "user", "content": message})
+        self._last_progress_note = None
         
         provider = self.window.get_llm_provider()
         provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "LM Studio":
+            provider_name = "LM Studio (Native SDK)"
+            self.settings.setValue("llm_provider", provider_name)
         if provider_name == "Ollama":
             model = self.settings.value("ollama_model", "llama3")
         else:
@@ -75,10 +86,31 @@ class ChatController:
         token_breakdown = {"User message": token_usage}
 
         # Update chat header to reflect current model
+        loaded_models = None
         try:
             models = provider.list_models()
             vision_models = [m for m in models if provider.is_vision_model(m)]
-            self.window.chat.update_model_info(provider_name, model, models, vision_models)
+            loaded_models = provider.get_loaded_models() if hasattr(provider, "get_loaded_models") else None
+            self.window.chat.update_model_info(provider_name, model, models, vision_models, loaded_models)
+        except Exception:
+            pass
+
+        # Inform the user about model load status when available
+        try:
+            if hasattr(provider, "is_model_loaded"):
+                loaded_state = provider.is_model_loaded(model)
+                if loaded_state is True:
+                    note = f"Model '{model}' is already loaded."
+                elif loaded_state is False:
+                    note = f"Model '{model}' is not loaded; LM Studio will load it now."
+                else:
+                    if loaded_models is not None:
+                        roster = ", ".join(loaded_models) if loaded_models else "none"
+                        note = f"Loaded models: {roster}."
+                    else:
+                        note = None
+                if note:
+                    self.window.chat.append_message("System", note)
         except Exception:
             pass
         
@@ -92,29 +124,23 @@ class ChatController:
             context = self.window.rag_engine.query(message, n_results=5, include_metadata=True)
             print(f"DEBUG: Retrieved {len(context)} chunks")
             
-            # Extract mentioned file paths and estimate tokens
+            # Extract mentioned file paths (do NOT add full-file tokens; we only count chunk text later)
             rag_file_info = []
             for chunk in context:
                 meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
                 source = meta.get("source")
                 if source:
                     mentioned_files.add(source)
-            
-            if mentioned_files:
-                for source in sorted(mentioned_files):
-                    try:
-                        content = self.window.project_manager.read_file(source)
-                        if content:
-                            tokens = estimate_tokens(content)
-                            rag_file_info.append(f"{source} ({tokens} tokens)")
-                            token_usage += tokens
-                            token_breakdown[f"RAG: {source}"] = token_breakdown.get(f"RAG: {source}", 0) + tokens
-                            included_files.add(source)  # Mark as included
-                    except Exception:
-                        pass
-                
-                if rag_file_info:
-                    print(f"DEBUG: Files from RAG context: {', '.join(rag_file_info)}")
+                    # Track included files for de-duplication of active/open tabs
+                    included_files.add(source)
+                    # Log approximate chunk token cost rather than full file
+                    chunk_tokens = estimate_tokens(chunk.get("text", "")) if isinstance(chunk, dict) else estimate_tokens(str(chunk))
+                    rag_file_info.append(f"{source} (~{chunk_tokens} chunk tokens)")
+                    token_breakdown[f"RAG chunk: {source}"] = token_breakdown.get(f"RAG chunk: {source}", 0) + chunk_tokens
+                    token_usage += chunk_tokens
+
+            if rag_file_info:
+                print(f"DEBUG: Files from RAG context: {', '.join(rag_file_info)}")
             
         # Get base system prompt and enhance it with edit format instructions
         self.window.chat.show_thinking()
@@ -184,14 +210,16 @@ class ChatController:
         else:
             system_prompt += "\n\n[System] Current model is TEXT ONLY."
 
-        # Inject Project Structure
-        if self.window.project_manager.root_path:
+        # Inject Project Structure only for "full" context to prevent overflow
+        if self.context_level == "full" and self.window.project_manager.root_path:
             structure = self.window.project_manager.get_project_structure()
-            if len(structure) > 20000:
-                structure = structure[:20000] + "\n... (truncated)"
+            # Be conservative: cap to ~8000 chars (~2000 tokens heuristically)
+            if len(structure) > 8000:
+                structure = structure[:8000] + "\n... (truncated)"
             system_prompt += f"\n\nProject Structure:\n{structure}"
-            token_usage += estimate_tokens(structure)
-            token_breakdown["Project structure"] = estimate_tokens(structure)
+            est = estimate_tokens(structure)
+            token_usage += est
+            token_breakdown["Project structure"] = est
             
         # Include selection info if present
         self._include_selection_info(active_path, token_usage, token_breakdown)
@@ -210,6 +238,7 @@ class ChatController:
         
         print(f"DEBUG: Enabled tools for this request: {enabled_tools}")
         print(f"DEBUG: Chat mode: {self.chat_mode}")
+        print(f"DEBUG: Token usage total={token_usage} breakdown={token_breakdown}")
              
         self.worker = ChatWorker(
             provider,
@@ -226,21 +255,65 @@ class ChatController:
         self.worker.response_thinking_done.connect(self.on_chat_thinking_done)
         self.worker.response_chunk.connect(self.on_chat_chunk)
         self.worker.response_received.connect(self.on_chat_response)
+        self.worker.progress_update.connect(self.on_chat_progress)
         self.worker.start()
 
         # Update dashboard with latest token estimate
-        if context:
-            for chunk in context:
-                if isinstance(chunk, dict):
-                    ctokens = estimate_tokens(chunk.get("text", ""))
-                    token_usage += ctokens
-                    source = chunk.get("metadata", {}).get("source", "context")
-                    token_breakdown[f"RAG chunk: {source}"] = token_breakdown.get(f"RAG chunk: {source}", 0) + ctokens
-                else:
-                    ctokens = estimate_tokens(str(chunk))
-                    token_usage += ctokens
-                    token_breakdown["RAG chunk"] = token_breakdown.get("RAG chunk", 0) + ctokens
+        # RAG chunk tokens were already counted above to avoid double counting
         self.window._update_token_dashboard(token_usage, token_breakdown)
+
+    def _prune_prior_context_from_history(self):
+        """Strip any previously injected context blocks from older user messages.
+
+        Ensures that when the user reduces context (e.g., from multiple files
+        down to one), prior context text (e.g., "Context:" and "Citations:")
+        does not persist in the conversation history sent to the model.
+
+        Only affects messages before the latest user message being sent.
+        """
+        try:
+            import re
+            if not self.chat_history:
+                return
+            # Process all but the last entry (which is about to be augmented fresh)
+            for i in range(0, len(self.chat_history) - 1):
+                msg = self.chat_history[i]
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get('role') != 'user':
+                    continue
+
+                content = msg.get('content', '')
+                if not content:
+                    continue
+
+                # Remove any prior Context: ... block (greedy until end or citations)
+                # Matches a "Context:" header followed by any content up to the end
+                # of the message or before a trailing reminder line.
+                cleaned = re.sub(r"\n\nContext:\n.*?(?=$|\n\nREMINDER:)",
+                                 "", content, flags=re.DOTALL)
+
+                # Remove any prior Citations: ... block
+                cleaned = re.sub(r"\n\nCitations:\n.*?(?=$|\n\nREMINDER:)",
+                                 "", cleaned, flags=re.DOTALL)
+
+                # Also remove any previously appended selection hint header to avoid
+                # unintended carry-over (keeps the raw message concise).
+                cleaned = re.sub(r"\n\nSelected Range in .*?: L\d+-L\d+\nSelected Text:\n```text\n.*?\n```\n.*?(?=$)",
+                                 "", cleaned, flags=re.DOTALL)
+
+                if cleaned != content:
+                    self.chat_history[i]['content'] = cleaned
+        except Exception as e:
+            print(f"DEBUG: Failed to prune prior context from history: {e}")
+
+    def on_chat_progress(self, status: str):
+        if not status:
+            return
+        if status == self._last_progress_note:
+            return
+        self._last_progress_note = status
+        self.window.chat.append_message("System", status)
 
     def _get_edit_instructions(self, image_gen_enabled):
         """Build edit format instructions.

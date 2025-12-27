@@ -2,8 +2,10 @@
 
 import re
 from PySide6.QtWidgets import QPlainTextEdit, QMenu
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QTextCursor, QTextFormat, QColor, QTextCharFormat
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont
 
 from .dialogs import LinkDialog
 
@@ -19,9 +21,33 @@ class CodeEditor(QPlainTextEdit):
         self.spell_check_timer.setSingleShot(True)
         self.spell_check_timer.timeout.connect(self._do_spell_check)
         
+        # Apply default font settings
+        self.apply_font_settings()
+        
         # Connect text changes for spell-checking
         if self.spell_checker:
             self.textChanged.connect(self._on_text_changed)
+
+    def apply_font_settings(self):
+        """Apply font settings from QSettings."""
+        settings = QSettings("InkwellAI", "InkwellAI")
+        font_family = settings.value("editor_font_family", "Monospace")
+        font_size = int(settings.value("editor_font_size", 11))
+
+        font = QFont(font_family, font_size)
+        self.setFont(font)
+
+    def zoom_in(self):
+        """Increase font size by 1 point."""
+        current_font = self.font()
+        current_font.setPointSize(min(32, current_font.pointSize() + 1))
+        self.setFont(current_font)
+
+    def zoom_out(self):
+        """Decrease font size by 1 point."""
+        current_font = self.font()
+        current_font.setPointSize(max(8, current_font.pointSize() - 1))
+        self.setFont(current_font)
     
     def set_spell_checker(self, spell_checker):
         """Set spell-checker instance.

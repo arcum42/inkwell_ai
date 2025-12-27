@@ -74,6 +74,21 @@ class DocumentWidget(QWidget):
     def request_batch_edit(self):
         self.batch_edit_requested.emit(self.file_path, self.get_content())
 
+    def apply_font_settings(self):
+        """Apply font settings to the editor and preview."""
+        self.editor.apply_font_settings()
+        self.preview.setFont(self.editor.font())
+    
+    def zoom_in(self):
+        """Increase font size."""
+        self.editor.zoom_in()
+        self.preview.setFont(self.editor.font())
+    
+    def zoom_out(self):
+        """Decrease font size."""
+        self.editor.zoom_out()
+        self.preview.setFont(self.editor.font())
+
     def on_modification_changed(self, changed):
         self.modification_changed.emit(changed)
 

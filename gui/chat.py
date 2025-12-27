@@ -1,10 +1,11 @@
 import html
 
 import markdown
-from PySide6 import QtGui  # Need QtGui for cursors in thinking logic
+from PySide6 import QtGui
 from PySide6.QtCore import Signal, Qt, QSize, QRect, QPoint
-from PySide6.QtGui import QClipboard
+from PySide6.QtGui import QClipboard, QKeySequence, QFont, QShortcut
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QPlainTextEdit, QPushButton, QHBoxLayout, QLabel, QLayout, QComboBox
+from PySide6.QtCore import QSettings
 
 
 class FlowLayout(QLayout):
@@ -104,7 +105,7 @@ class ChatWidget(QWidget):
     regenerate_requested = Signal()  # Request to regenerate last response
     continue_requested = Signal()  # Request to continue generation
     new_chat_requested = Signal()  # Request to start a new chat (saves current first)
-    provider_changed = Signal(str)  # Emits new provider name (Ollama or LM Studio)
+    provider_changed = Signal(str)  # Emits new provider name (Ollama or LM Studio Native)
     model_changed = Signal(str)  # Emits new model name
     refresh_models_requested = Signal()  # Request to refresh available models
     context_level_changed = Signal(str)  # Emits context level: "None", "Visible", "All", "Full"
@@ -117,6 +118,15 @@ class ChatWidget(QWidget):
         self.layout = QVBoxLayout(self)
         self.messages = []  # Store messages as (sender, text) tuples
         
+        # Apply font settings
+        self.apply_font_settings()
+        
+        # Zoom shortcuts
+        self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl++"), self)
+        self.zoom_in_shortcut.activated.connect(self.zoom_in)
+        self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.zoom_out_shortcut.activated.connect(self.zoom_out)
+        
         # Model Selection Controls
         controls_layout = QHBoxLayout()
         controls_layout.setContentsMargins(0, 0, 0, 5)
@@ -124,7 +134,7 @@ class ChatWidget(QWidget):
         
         # Provider dropdown
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["Ollama", "LM Studio", "LM Studio (Native SDK)"])
+        self.provider_combo.addItems(["Ollama", "LM Studio (Native SDK)"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         self.provider_combo.setMinimumWidth(100)
         controls_layout.addWidget(self.provider_combo)
@@ -173,10 +183,20 @@ class ChatWidget(QWidget):
         self.thinking_title = "Assistant is thinking…"
         self.current_mode = "edit"  # Default mode: edit or ask
         self.streaming_response = False  # Track if we're currently streaming a response
+        self._streaming_buffer = ""  # Buffer for accumulating streaming chunks
+        self.raw_view = False  # Track if raw view is active
         
         # Chat Control Buttons - Wrappable layout
         button_layout = FlowLayout()
         button_layout.setSpacing(5)
+        
+        raw_view_btn = QPushButton("📜")
+        raw_view_btn.setMaximumWidth(40)
+        raw_view_btn.setToolTip("Toggle raw message view (shows unparsed LLM responses)")
+        raw_view_btn.setCheckable(True)
+        raw_view_btn.toggled.connect(self.on_raw_view_toggled)
+        button_layout.addWidget(raw_view_btn)
+        self.raw_view_btn = raw_view_btn
         
         regenerate_btn = QPushButton("🔄")
         regenerate_btn.setMaximumWidth(40)
@@ -275,8 +295,36 @@ class ChatWidget(QWidget):
         
         input_layout.addLayout(send_layout)
         self.layout.addLayout(input_layout)
+    
+    def apply_font_settings(self):
+        """Apply font settings from QSettings to chat history and input."""
+        settings = QSettings("InkwellAI", "InkwellAI")
+        font_family = settings.value("editor_font_family", "Monospace")
+        font_size = int(settings.value("editor_font_size", 11))
+        
+        font = QFont(font_family, font_size)
+        if hasattr(self, 'history'):
+            self.history.setFont(font)
+        if hasattr(self, 'input_field'):
+            self.input_field.setFont(font)
+    
+    def zoom_in(self):
+        """Increase font size by 1 point."""
+        if hasattr(self, 'history'):
+            current_font = self.history.font()
+            current_font.setPointSize(min(32, current_font.pointSize() + 1))
+            self.history.setFont(current_font)
+            self.input_field.setFont(current_font)
+    
+    def zoom_out(self):
+        """Decrease font size by 1 point."""
+        if hasattr(self, 'history'):
+            current_font = self.history.font()
+            current_font.setPointSize(max(8, current_font.pointSize() - 1))
+            self.history.setFont(current_font)
+            self.input_field.setFont(current_font)
 
-    def update_model_info(self, provider_name, model_name, available_models=None, vision_models=None):
+    def update_model_info(self, provider_name, model_name, available_models=None, vision_models=None, loaded_models=None):
         """Update model info and populate dropdown.
         
         Args:
@@ -284,6 +332,7 @@ class ChatWidget(QWidget):
             model_name: Current model name
             available_models: List of available model names
             vision_models: List of model names that support vision
+            loaded_models: List of models currently loaded (if known)
         """
         # Set provider combo without triggering signal
         self.provider_combo.blockSignals(True)
@@ -293,11 +342,14 @@ class ChatWidget(QWidget):
         # Update model combo with vision indicators
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        loaded_set = set(loaded_models or [])
         
         if available_models:
             vision_models = vision_models or []
             for model in available_models:
-                display_text = f"👁️ {model}" if model in vision_models else model
+                eye = "👁️ " if model in vision_models else ""
+                loaded = "🟢 " if model in loaded_set else ""
+                display_text = f"{loaded}{eye}{model}" if (loaded or eye) else model
                 self.model_combo.addItem(display_text, model)  # Store actual model name in data
             
             # Set current model
@@ -311,16 +363,19 @@ class ChatWidget(QWidget):
         
         self.model_combo.blockSignals(False)
     
-    def set_available_models(self, models, vision_models=None):
-        """Update the list of available models in the dropdown with vision indicators."""
+    def set_available_models(self, models, vision_models=None, loaded_models=None):
+        """Update the list of available models in the dropdown with vision/loaded indicators."""
         current_data = self.model_combo.currentData() or self.model_combo.currentText()
         
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        loaded_set = set(loaded_models or [])
         
         vision_models = vision_models or []
         for model in models:
-            display_text = f"👁️ {model}" if model in vision_models else model
+            eye = "👁️ " if model in vision_models else ""
+            loaded = "🟢 " if model in loaded_set else ""
+            display_text = f"{loaded}{eye}{model}" if (loaded or eye) else model
             self.model_combo.addItem(display_text, model)
         
         # Try to restore previous selection
@@ -565,19 +620,37 @@ class ChatWidget(QWidget):
         self.messages.append((sender, text, raw_text or text))  # Store as 3-tuple
         autoscroll = self._should_autoscroll()
         
-        # Convert Markdown to HTML
-        html_content = markdown.markdown(text)
+        # Check if we should combine with previous System message (only in normal view)
+        if not self.raw_view and sender == "System" and self.messages and len(self.messages) >= 2:
+            prev_sender = self.messages[-2][0] if len(self.messages) >= 2 else None
+            if prev_sender == "System":
+                # Combine with previous system message
+                self._combine_system_message(msg_index, text)
+                if autoscroll:
+                    self._scroll_to_bottom(force=True)
+                return
+        
+        # Choose display text based on view mode
+        display_text = (raw_text or text) if self.raw_view else text
+        
+        # Format based on view mode
+        if self.raw_view:
+            # Raw view: plain text in monospace, no markdown parsing
+            escaped_text = html.escape(display_text)
+            html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; font-size: 10pt;">{escaped_text}</pre>'
+        else:
+            # Normal view: markdown rendering
+            html_content = markdown.markdown(display_text)
         
         # Format the message block with edit/delete controls
-        sender_color = "#4CAF50" if sender == "User" else "#2196F3"
+        sender_color = "#4CAF50" if sender == "User" else ("#2196F3" if sender == "Assistant" else "#888")
         
-        # Add message controls (edit and delete)
+        # Add message controls (without Raw button)
         controls_html = f'''
         <div style="margin-top: 5px;">
             <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
             <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
-            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
-            <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
+            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📋 Copy</a>
         </div>
         '''
         
@@ -592,6 +665,68 @@ class ChatWidget(QWidget):
         self.history.append(formatted_msg)
         if autoscroll:
             self._scroll_to_bottom(force=True)
+    
+    def _combine_system_message(self, msg_index, new_text):
+        """Combine a new system message with the previous system message block."""
+        # Find and update the last system message block in the history
+        doc = self.history.document()
+        cursor = QtGui.QTextCursor(doc)  # Use a QTextCursor; doc.end() returns a QTextBlock
+        
+        # Search backwards for the last system message block
+        cursor.movePosition(QtGui.QTextCursor.Start)
+        cursor.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
+        html = cursor.selection().toHtml()
+        
+        # Find the last System message div
+        import re
+        # Pattern to find the last system message content div
+        pattern = r'(<div[^>]*data-msg-index="(\d+)"[^>]*>.*?<b[^>]*>System:</b>.*?<div[^>]*>)(.*?)(</div>.*?</div>\s*<hr>)'
+        matches = list(re.finditer(pattern, html, re.DOTALL))
+        
+        if matches:
+            last_match = matches[-1]
+            prev_index = int(last_match.group(2))
+            
+            # Get previous message content and append new text
+            prev_content = self.messages[prev_index][1]
+            combined_text = prev_content + "\n" + new_text
+            
+            # Update stored message
+            self.messages[prev_index] = ("System", combined_text, combined_text)
+            
+            # Rebuild the combined HTML
+            html_content = markdown.markdown(combined_text)
+            sender_color = "#888"
+            
+            controls_html = f'''
+            <div style="margin-top: 5px;">
+                <a href="edit:{prev_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
+                <a href="delete:{prev_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
+                <a href="copy:{prev_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📋 Copy</a>
+            </div>
+            '''
+            
+            new_formatted_msg = f"""
+            <div style="margin-bottom: 10px;" data-msg-index="{prev_index}">
+                <b style="color: {sender_color};">System:</b>
+                <div style="margin-top: 5px;">{html_content}</div>
+                {controls_html}
+            </div>
+            <hr>
+            """
+            
+            # Replace the old system message with the combined one
+            # Remove the last system message block and hr
+            cursor.movePosition(QtGui.QTextCursor.End)
+            # Find last <hr> and select everything from the previous <hr> to the end
+            search_text = '<div style="margin-bottom: 10px;" data-msg-index="' + str(prev_index) + '"'
+            cursor.movePosition(QtGui.QTextCursor.Start)
+            cursor = doc.find(search_text, cursor)
+            if not cursor.isNull():
+                start_pos = cursor.position()
+                cursor.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+                cursor.insertHtml(new_formatted_msg)
 
     def begin_thinking(self):
         """Show a lightweight thinking indicator with a toggle link."""
@@ -670,36 +805,20 @@ class ChatWidget(QWidget):
                 cursor.deletePreviousChar()
 
     def begin_streaming_response(self):
-        """Start a new Assistant message block for streaming."""
+        """Prepare to accumulate a streaming response in a buffer.
+        
+        Don't add anything to the chat display yet - just initialize the buffer.
+        The complete message will be added when streaming finishes.
+        """
         if not self.streaming_response:
             self.streaming_response = True
-            # Store index where streaming message starts
-            msg_index = len(self.messages)
-            self.messages.append(("Assistant", ""))
-            
-            # Add message header with controls
-            sender_color = "#2196F3"
-            controls_html = f'''
-            <div style="margin-top: 5px;">
-                <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
-                <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
-                <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
-                <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
-            </div>
-            '''
-            
-            formatted_msg = f"""
-            <div style="margin-bottom: 10px;" data-msg-index="{msg_index}" id="streaming-message">
-                <b style="color: {sender_color};">Assistant:</b>
-                <div style="margin-top: 5px;" id="streaming-content"></div>
-                {controls_html}
-            </div>
-            <hr>
-            """
-            self.history.append(formatted_msg)
+            # Store index where streaming message will be inserted
+            self._streaming_msg_index = len(self.messages)
+            # Initialize streaming buffer for this message
+            self._streaming_buffer = ""
     
     def finish_streaming_response(self, final_text: str, raw_text: str = None):
-        """Replace streamed content with final parsed/formatted response.
+        """Add the streamed response to the chat as a complete message.
         
         Args:
             final_text: Final formatted response after parsing
@@ -710,67 +829,31 @@ class ChatWidget(QWidget):
         
         self.streaming_response = False
         
-        # Update stored message with final content (store both display and raw)
-        if self.messages and self.messages[-1][0] == "Assistant":
-            self.messages[-1] = ("Assistant", final_text, raw_text or final_text)
+        # If no final_text provided, use the accumulated streaming buffer
+        if not final_text and hasattr(self, '_streaming_buffer'):
+            final_text = self._streaming_buffer
         
-        # Find and replace the streaming message div
-        doc = self.history.document()
-        cursor = doc.find("streaming-message")
-        if not cursor.isNull():
-            # Select the entire streaming message block
-            cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
-            # Find the end (next <hr> or end of doc)
-            start_pos = cursor.position()
-            cursor.movePosition(QtGui.QTextCursor.End)
-            cursor.setPosition(start_pos, QtGui.QTextCursor.KeepAnchor)
-            
-            # Search for closing hr
-            text = cursor.selectedText()
-            # Remove old content
-            cursor.removeSelectedText()
-            
-        # Now append the properly formatted final message
-        msg_index = len(self.messages) - 1
-        html_content = markdown.markdown(final_text)
-        sender_color = "#2196F3"
+        # Add the complete response as a single message (seamless)
+        self.append_message("Assistant", final_text, raw_text=raw_text or final_text)
         
-        controls_html = f'''
-        <div style="margin-top: 5px;">
-            <a href="edit:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">✏️ Edit</a>
-            <a href="delete:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">🗑️ Delete</a>
-            <a href="copy:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-right: 10px;">📋 Copy</a>
-            <a href="raw:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none;">📝 Raw</a>
-        </div>
-        '''
-        
-        formatted_msg = f"""
-        <div style="margin-bottom: 10px;" data-msg-index="{msg_index}">
-            <b style="color: {sender_color};">Assistant:</b>
-            <div style="margin-top: 5px;">{html_content}</div>
-            {controls_html}
-        </div>
-        <hr>
-        """
-        self.history.append(formatted_msg)
+        # Clear the streaming buffer
+        self._streaming_buffer = ""
 
     def append_response_chunk(self, chunk: str):
         """Append a chunk of streaming response to the chat.
         
         Called as tokens arrive from the LLM during streaming.
-        Appends text directly to the current response without processing.
+        Accumulates chunks in a buffer without displaying them yet.
+        The full message will be displayed when streaming is complete.
         
         Args:
             chunk: String token/chunk to append
         """
-        # Get the text cursor and move to end
-        autoscroll = self._should_autoscroll()
-        cursor = self.history.textCursor()
-        cursor.movePosition(QtGui.QTextCursor.End)
-        cursor.insertText(chunk)
-
-        if autoscroll:
-            self._scroll_to_bottom()
+        if not self.streaming_response or not hasattr(self, '_streaming_buffer'):
+            return
+        
+        # Just accumulate the chunk - don't display it yet
+        self._streaming_buffer += chunk
 
     def handle_copy_message(self, msg_index):
         """Copy a single message's raw text to clipboard."""
@@ -782,32 +865,10 @@ class ChatWidget(QWidget):
         clipboard.setText(text, QClipboard.Clipboard)
         self.message_copied.emit("message")
 
-    def handle_raw_message(self, msg_index):
-        """Show a dialog with the exact stored text for troubleshooting."""
-        if msg_index >= len(self.messages):
-            return
-        # Messages are stored as (sender, display_text, raw_text) tuples
-        msg_tuple = self.messages[msg_index]
-        raw_text = msg_tuple[2] if len(msg_tuple) > 2 else msg_tuple[1]
-        
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Raw message")
-        dialog.setMinimumSize(500, 300)
-
-        layout = QVBoxLayout(dialog)
-        text_edit = QTextEdit()
-        text_edit.setPlainText(raw_text)
-        text_edit.setReadOnly(True)
-        layout.addWidget(text_edit)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        dialog.exec()
+    def on_raw_view_toggled(self, checked):
+        """Toggle between normal and raw message view."""
+        self.raw_view = checked
+        self.rebuild_chat_display()
 
     def _should_autoscroll(self, threshold: int = 4) -> bool:
         """Return True if the view is within `threshold` pixels of bottom."""
@@ -828,6 +889,8 @@ class ChatWidget(QWidget):
         self.thinking_active = False
         self.thinking_present = False
         self.thinking_expanded = False
+        self._streaming_buffer = ""
+        self.streaming_response = False
 
     def show_thinking(self):
         """Appends a temporary 'Thinking...' message."""

@@ -3,7 +3,7 @@
 import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QMessageBox
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 
 from .document_viewer import DocumentWidget
 from .image_viewer import ImageViewerWidget
@@ -34,8 +34,32 @@ class EditorWidget(QWidget):
         self.search_replace.close_requested.connect(self.hide_search)
         self.layout.addWidget(self.search_replace)
         
+        # Zoom shortcuts
+        self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl++"), self)
+        self.zoom_in_shortcut.activated.connect(self.zoom_in)
+        self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.zoom_out_shortcut.activated.connect(self.zoom_out)
+        
         self.open_files = {}  # path -> widget
         self.project_path = None  # Track project root for relative path resolution
+    
+    def zoom_in(self):
+        """Increase font size in current editor."""
+        widget = self.tabs.currentWidget()
+        if isinstance(widget, DocumentWidget):
+            widget.zoom_in()
+    
+    def zoom_out(self):
+        """Decrease font size in current editor."""
+        widget = self.tabs.currentWidget()
+        if isinstance(widget, DocumentWidget):
+            widget.zoom_out()
+    
+    def apply_font_settings(self):
+        """Apply font settings to all open documents."""
+        for widget in self.open_files.values():
+            if isinstance(widget, DocumentWidget):
+                widget.apply_font_settings()
 
     def set_project_path(self, path):
         """Set the project root path for resolving relative paths in markdown."""
