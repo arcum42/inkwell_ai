@@ -256,7 +256,7 @@ class ChatController:
             enabled_tools=enabled_tools,
             mode=self.chat_mode,
             structured_enabled=bool(self.settings.value("structured_enabled", False, type=bool)),
-            schema_id=self.settings.value("structured_schema_id", "None") if self.settings.value("structured_enabled", False, type=bool) else None,
+            schema_id=self._select_schema_id(enabled_tools, self.chat_mode) if self.settings.value("structured_enabled", False, type=bool) else None,
         )
         self.worker.response_thinking_start.connect(self.on_chat_thinking_start)
         self.worker.response_thinking_chunk.connect(self.on_chat_thinking_chunk)
@@ -726,6 +726,28 @@ class ChatController:
         display_response = self._strip_unknown_edit_links(display_response)
         
         return display_response
+
+    def _select_schema_id(self, enabled_tools: set | None, mode: str) -> str | None:
+        """Determine effective schema id for this request.
+        Priority: explicit selection in settings → tool-preferred → mode default → None.
+        """
+        chosen = self.settings.value("structured_schema_id", "None")
+        if chosen and chosen != "None":
+            return chosen
+        # Tool-preferred schema
+        try:
+            from core.tool_base import get_registry
+            sid = get_registry().get_preferred_schema_id(enabled_tools)
+            if sid:
+                return sid
+        except Exception:
+            pass
+        # Mode defaults
+        if mode == "edit":
+            return "diff_patch"
+        if mode == "ask":
+            return "chat_split"
+        return None
 
     def _parse_and_validate_structured(self, response_text: str, schema_id: str):
         """Attempt to parse response as JSON and validate against a schema.

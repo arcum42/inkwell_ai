@@ -84,6 +84,15 @@ class Tool(ABC):
         """
         return f":::TOOL:{self.name}:query...:::"
 
+    def get_preferred_schema_id(self) -> Optional[str]:
+        """Return a preferred structured schema id for this tool, if any.
+
+        Tools can override to guide structured response selection per-request.
+        Example: return 'tool_result' for data-fetching tools.
+        Default: None.
+        """
+        return None
+
 
 class ToolRegistry:
     """Central registry for all available tools."""
@@ -170,6 +179,24 @@ class ToolRegistry:
         lines.append("- User: 'Search for python tutorials' → You: :::TOOL:SEARCH:python tutorials:::")
         lines.append("- User: 'What is quantum computing' → You: :::TOOL:WIKI:quantum computing:::")
         return "\n".join(lines)
+
+    def get_preferred_schema_id(self, enabled_names: Optional[set] = None) -> Optional[str]:
+        """Return the first preferred schema id from available tools.
+
+        Args:
+            enabled_names: Optional set of tool names allowed.
+        Returns:
+            A schema id string or None.
+        """
+        for tool in self.get_available_tools(enabled_names):
+            sid = None
+            try:
+                sid = tool.get_preferred_schema_id()
+            except Exception:
+                sid = None
+            if sid:
+                return sid
+        return None
 
 
 # Global registry instance

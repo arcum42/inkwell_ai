@@ -81,6 +81,7 @@
   - `tool_result`: `request`, `result`, optional `citations` (array of strings).
   - `chat_split`: `analysis`, `answer`, optional `actions` (array of strings) to separate discussion vs answer.
 - Allow tools to register schemas (e.g., tool class static method returning schema id or definition).
+  - Per-tool auto selection: tools can expose a preferred schema id and the registry can suggest one automatically for a request when user selection is None.
 
 ### Core: LM Studio Native Structured Request
 - Map schema to SDK `response_format` per https://lmstudio.ai/docs/python/llm-prediction/structured-response.
@@ -91,13 +92,14 @@
 - Thread new options through `ChatController` → `ChatWorker` → provider call: `structured_enabled: bool`, `schema_id: Optional[str]`.
 - Persist last-selected schema per provider/model in `QSettings` for convenience.
 - When in ask/edit modes, allow different defaults (e.g., `chat_split` for ask, `diff_patch` for edit) but keep user override.
-- On response: detect structured payload, parse JSON, optionally validate against schema, and store both raw and parsed forms for rendering.
+- On response: detect structured payload, parse JSON, optionally validate against schema (jsonschema), and store both raw and parsed forms for rendering.
 - Failure handling: if parsing/validation fails, fall back to raw text and emit a warning in the chat transcript.
 
 ### UI/UX
 - Settings dialog: global checkbox "Enable structured responses (JSON schema)" with tooltip explaining provider support and fallback.
 - Chat composer advanced section: schema dropdown (None, Basic Answer, Diff/Patch, Tool Result, Chat Split, plus tool-provided entries when relevant).
 - Response bubble: show a schema badge, a toggle for parsed vs raw JSON, and a warning badge on validation failure.
+  - Add per-message JSON viewer (dialog or collapsible panel) to inspect raw payload.
 - Optional: per-message toggle to disable structured output quickly.
 
 ### Persistence & Metadata
@@ -123,6 +125,17 @@
 ### Future Extensions
 - Streaming structured responses once confirmed stable in SDK.
 - Per-tool schemas auto-selected by tool calls; tool UI hints showing expected schema.
+- Tool-driven schema selection: tools expose `get_preferred_schema_id()`; controller uses it when user selection is None; supports project/tool overrides.
+
+## Per-Tool Auto Schema Selection
+- Approach: extend `Tool` with `get_preferred_schema_id()` and add `ToolRegistry.get_preferred_schema_id()` to aggregate preferences.
+- Controller strategy: effective schema id resolves by priority:
+  1) User-selected schema in settings/chat (if not "None")
+  2) Tool-preferred schema from registry (first available tool that specifies one)
+  3) Mode defaults (`diff_patch` for edit, `chat_split` for ask)
+  4) None (fallback to normal text)
+- UI: Keep manual selection authoritative; indicator shows current manual selection while controller silently applies auto choice when selection is None.
+- Tests: verify auto selection path picks tool-preferred schemas; verify mode defaults; verify explicit selection overrides auto.
 - Project-level schema overrides (e.g., `.inkwell/config.json`) and user-added schemas in the registry.
 - Structured diffs piped directly into DiffDialog without ad-hoc string parsing.
 
