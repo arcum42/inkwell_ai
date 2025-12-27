@@ -385,6 +385,13 @@ class ChatWidget(QWidget):
             self.model_combo.setCurrentIndex(0)
         
         self.model_combo.blockSignals(False)
+
+        # Update schema list and indicator to reflect current provider
+        try:
+            self._populate_schema_dropdown(provider_name)
+        except Exception:
+            pass
+        self._update_structured_indicator()
     
     def set_available_models(self, models, vision_models=None, loaded_models=None):
         """Update the list of available models in the dropdown with vision/loaded indicators."""
