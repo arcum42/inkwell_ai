@@ -16,7 +16,7 @@ import html as _html
 from PySide6.QtWidgets import QMessageBox, QFileDialog
 from PySide6.QtCore import QSettings
 
-from gui.workers import ChatWorker, ToolWorker, BatchWorker
+from gui.workers import ChatWorker, ToolWorker
 from gui.dialogs.diff_dialog import DiffDialog
 from gui.dialogs.batch_diff_dialog import BatchDiffDialog
 from gui.dialogs.chat_history_dialog import ChatHistoryDialog

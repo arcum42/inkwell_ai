@@ -13,7 +13,6 @@ class EditorWidget(QWidget):
     """Tab-based editor widget managing multiple documents and images."""
     
     modification_changed = Signal(bool)  # Emits when current tab's modification state changes
-    batch_edit_requested = Signal(str, str)  # path, content
     tab_closed = Signal()  # Emits when a tab is closed
 
     def __init__(self, parent=None, spell_checker=None):
@@ -79,7 +78,6 @@ class EditorWidget(QWidget):
                                    spell_checker=self.spell_checker)
             widget.link_clicked.connect(self.handle_link_click)
             widget.modification_changed.connect(lambda m: self.on_doc_modified(widget, m))
-            widget.batch_edit_requested.connect(self.propagate_batch_edit)
             
         widget.setProperty("file_path", path)
         
@@ -239,9 +237,6 @@ class EditorWidget(QWidget):
         if isinstance(current_widget, DocumentWidget):
             return current_widget.property("file_path"), current_widget.get_content()
         return None, None
-
-    def propagate_batch_edit(self, path, content):
-        self.batch_edit_requested.emit(path, content)
 
     def update_open_file_path(self, old_path, new_path):
         """Update tabs and internal mapping when a file or folder is renamed/moved.

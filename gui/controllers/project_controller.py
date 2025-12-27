@@ -49,7 +49,9 @@ class ProjectController:
             except Exception:
                 pass
                 
-            self.window.sidebar.set_root_path(folder_path)
+            # Add main project to sidebar
+            self.window.sidebar.add_project("Project", folder_path)
+            
             self.window.setWindowTitle(f"Inkwell AI - {folder_path}")
             self.window.stack.setCurrentWidget(self.window.main_interface)
             
@@ -88,7 +90,7 @@ class ProjectController:
             
             # Connect RAG engine to sidebar for status indicators
             if hasattr(self.window, 'sidebar'):
-                self.window.sidebar.set_rag_engine(self.window.rag_engine)
+                self.window.sidebar.set_rag_engine(self.window.rag_engine, "Project")
             
             # Start indexer worker with cancel support
             self.index_worker = IndexWorker(self.window.rag_engine)
@@ -111,6 +113,9 @@ class ProjectController:
             personas = self.window.project_manager.get_all_personas()
             active_name, _ = self.window.project_manager.get_active_persona()
             self.window.chat.update_personas(personas, active_name)
+            
+            # Try to open assets folder if configured
+            self._open_assets_folder()
             
             # Restore Tabs
             self.restore_project_state(folder_path)
@@ -177,6 +182,29 @@ class ProjectController:
         if image_studio_open:
             self.window.open_image_studio()
     
+    def _open_assets_folder(self):
+        """Open the configured assets folder in sidebar if it exists."""
+        assets_path = self.settings.value("assets_folder", "assets")  # Default to "assets" folder
+        
+        # If relative path, resolve it
+        if assets_path and not os.path.isabs(assets_path):
+            # Try relative to project root first
+            if self.window.project_manager.root_path:
+                proj_assets = os.path.join(self.window.project_manager.root_path, assets_path)
+                if os.path.isdir(proj_assets):
+                    assets_path = proj_assets
+                else:
+                    # Try relative to app root (parent of gui/ directory)
+                    # Project controller is at: inkwell_ai/gui/controllers/project_controller.py
+                    app_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    assets_path = os.path.join(app_root, assets_path)
+        
+        # Only add assets folder if it exists and is different from project root
+        if assets_path and os.path.isdir(assets_path):
+            if assets_path != self.window.project_manager.root_path:
+                print(f"DEBUG: Opening assets folder from {assets_path}")
+                self.window.sidebar.add_project("Assets", assets_path)
+    
     def on_index_progress(self, current, total, file_path):
         """Update progress bar during indexing.
         
@@ -190,7 +218,7 @@ class ProjectController:
             self.window.indexing_progress.setValue(current)
             # Update sidebar to show indexed file status
             if self.window.rag_engine and hasattr(self.window, 'sidebar'):
-                self.window.sidebar.update_file_status()
+                self.window.sidebar.update_file_status("Project")
         self.index_progress_state = (current, total, file_path)
         self.window._update_token_dashboard()
     
@@ -202,7 +230,7 @@ class ProjectController:
             del self.window.indexing_progress
         # Final update of file statuses
         if hasattr(self.window, 'sidebar'):
-            self.window.sidebar.update_file_status()
+            self.window.sidebar.update_file_status("Project")
         self.index_progress_state = None
         self.window._update_token_dashboard()
         print("Indexing complete")
@@ -226,7 +254,11 @@ class ProjectController:
         
         # Clear state
         self.window.project_manager.root_path = None
-        self.window.sidebar.model.setRootPath("")
+        
+        # Clear all projects from sidebar
+        for project_name in list(self.window.sidebar.project_sections.keys()):
+            self.window.sidebar.remove_project(project_name)
+        
         self.window.setWindowTitle("Inkwell AI")
         
         # Close all tabs

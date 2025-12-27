@@ -15,7 +15,6 @@ class DocumentWidget(QWidget):
     
     link_clicked = Signal(str)  # Emits path or URL when a link is clicked
     modification_changed = Signal(bool)  # Emits when modified state changes
-    batch_edit_requested = Signal(str, str)  # Emits (path, content)
 
     def __init__(self, file_path, content, base_dir=None, spell_checker=None, parent=None):
         super().__init__(parent)
@@ -36,13 +35,8 @@ class DocumentWidget(QWidget):
         self.preview_btn.setCheckable(True)
         self.preview_btn.clicked.connect(self.show_preview)
         
-        self.batch_btn = QPushButton("Batch Edit")
-        self.batch_btn.setStatusTip("Process large file in chunks")
-        self.batch_btn.clicked.connect(self.request_batch_edit)
-        
         self.toolbar_layout.addWidget(self.edit_btn)
         self.toolbar_layout.addWidget(self.preview_btn)
-        self.toolbar_layout.addWidget(self.batch_btn)
         self.toolbar_layout.addStretch()
         
         self.layout.addLayout(self.toolbar_layout)
@@ -70,9 +64,6 @@ class DocumentWidget(QWidget):
         self.stack.addWidget(self.preview)
         
         self.layout.addWidget(self.stack)
-
-    def request_batch_edit(self):
-        self.batch_edit_requested.emit(self.file_path, self.get_content())
 
     def apply_font_settings(self):
         """Apply font settings to the editor and preview."""

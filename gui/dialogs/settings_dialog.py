@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QInputDialog,
+    QFileDialog,
 )
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont
@@ -25,6 +26,7 @@ from core.tool_base import get_registry
 # Ensure tools are loaded and registered
 import core.tools  # noqa: F401
 from core.tools.registry import AVAILABLE_TOOLS
+import os
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -122,6 +124,19 @@ class SettingsDialog(QDialog):
         self.default_image_folder.setPlaceholderText("assets/images")
         self.default_image_folder.setText(self.settings.value("default_image_folder", "assets/images"))
         form_layout.addRow("Default Image Folder:", self.default_image_folder)
+        
+        # Assets Folder for reusable program assets
+        assets_layout = QHBoxLayout()
+        self.assets_folder = QLineEdit()
+        self.assets_folder.setPlaceholderText("assets")
+        self.assets_folder.setText(self.settings.value("assets_folder", "assets"))
+        assets_layout.addWidget(self.assets_folder)
+        
+        browse_assets_btn = QPushButton("Browse...")
+        browse_assets_btn.clicked.connect(self.browse_assets_folder)
+        assets_layout.addWidget(browse_assets_btn)
+        
+        form_layout.addRow("Assets Folder:", assets_layout)
         
         layout.addLayout(form_layout)
         layout.addStretch()
@@ -631,6 +646,27 @@ class SettingsDialog(QDialog):
     def on_provider_changed(self, provider_name: str):
         # Adjust URL visibility
         self.update_url_visibility(provider_name)
+    
+    def browse_assets_folder(self):
+        """Open folder browser for assets folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Assets Folder",
+            self.assets_folder.text() or os.path.expanduser("~")
+        )
+        if folder:
+            # Store as relative path if possible
+            try:
+                # Try to make it relative to the app directory
+                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                rel_path = os.path.relpath(folder, app_dir)
+                if not rel_path.startswith(".."):
+                    self.assets_folder.setText(rel_path)
+                else:
+                    self.assets_folder.setText(folder)
+            except ValueError:
+                # Different drives on Windows
+                self.assets_folder.setText(folder)
 
     def save_settings(self):
         self.settings.setValue("llm_provider", self.provider_combo.currentText())
@@ -655,6 +691,12 @@ class SettingsDialog(QDialog):
         if not folder_value:
             folder_value = "assets/images"
         self.settings.setValue("default_image_folder", folder_value)
+        
+        # Save assets folder
+        assets_value = self.assets_folder.text().strip()
+        if not assets_value:
+            assets_value = "assets"
+        self.settings.setValue("assets_folder", assets_value)
 
         # Persist project-specific configuration if a project is open
         if self.proj and self.proj.get_root_path():

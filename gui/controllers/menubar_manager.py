@@ -151,34 +151,6 @@ class MenuBarManager:
         
         toolbar.addSeparator()
 
-        # New File
-        new_file_act = QAction(style.standardIcon(QStyle.SP_FileIcon), "New File", self.window)
-        new_file_act.setStatusTip("Create a new file")
-        new_file_act.triggered.connect(lambda: self.window.sidebar.create_new_file(self.window.sidebar.tree.currentIndex()))
-        toolbar.addAction(new_file_act)
-        
-        # New Folder
-        new_folder_act = QAction(style.standardIcon(QStyle.SP_DirIcon), "New Folder", self.window)
-        new_folder_act.setStatusTip("Create a new folder")
-        new_folder_act.triggered.connect(lambda: self.window.sidebar.create_new_folder(self.window.sidebar.tree.currentIndex()))
-        toolbar.addAction(new_folder_act)
-
-        # Rename
-        rename_act = QAction(QIcon.fromTheme("edit-rename"), "Rename", self.window)
-        if rename_act.icon().isNull():
-            rename_act.setIcon(style.standardIcon(QStyle.SP_FileDialogDetailedView))
-        rename_act.setStatusTip("Rename selected file/folder")
-        rename_act.triggered.connect(lambda: self.window.sidebar.rename_item(self.window.sidebar.tree.currentIndex()))
-        toolbar.addAction(rename_act)
-
-        # Move To
-        move_act = QAction(QIcon.fromTheme("transform-move"), "Move To…", self.window)
-        if move_act.icon().isNull():
-            move_act.setIcon(style.standardIcon(QStyle.SP_ArrowForward))
-        move_act.setStatusTip("Move selected file/folder")
-        move_act.triggered.connect(lambda: self.window.sidebar.move_item(self.window.sidebar.tree.currentIndex()))
-        toolbar.addAction(move_act)
-
         # Undo File Change
         file_undo_act = QAction(QIcon.fromTheme("edit-undo"), "Undo File Change", self.window)
         if file_undo_act.icon().isNull():

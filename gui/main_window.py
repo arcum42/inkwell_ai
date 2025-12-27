@@ -18,7 +18,7 @@ from gui.image_gen import ImageGenWidget
 
 from gui.controllers import MenuBarManager, ProjectController, EditorController, ChatController
 
-from gui.workers import ChatWorker, BatchWorker, ToolWorker, IndexWorker
+from gui.workers import ChatWorker, ToolWorker, IndexWorker
 import re
 import os
 import hashlib
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         
         # Sidebar
         self.sidebar = Sidebar()
-        self.sidebar.tree.doubleClicked.connect(self.on_file_double_clicked)
+        self.sidebar.file_double_clicked.connect(self.on_file_double_clicked)
         self.main_splitter.addWidget(self.sidebar)
         
         # Content Splitter (Editor vs Chat)
@@ -89,7 +89,6 @@ class MainWindow(QMainWindow):
         
         # Editor Area
         self.editor = EditorWidget(spell_checker=self.spell_checker)
-        self.editor.batch_edit_requested.connect(self.handle_batch_edit)
         self.editor.tab_closed.connect(self.save_project_state)
         self.content_splitter.addWidget(self.editor)
         
@@ -181,11 +180,7 @@ class MainWindow(QMainWindow):
         """Delegate to ProjectController."""
         self.project_controller.restore_project_state()
     
-    # File operations -> EditorController
-    def on_file_double_clicked(self, index):
-        """Delegate to EditorController."""
-        self.editor_controller.on_file_double_clicked(index)
-    
+    # File operations handled directly or via EditorController
     def save_current_file(self):
         """Delegate to EditorController."""
         self.editor_controller.save_current_file()
@@ -794,45 +789,7 @@ class MainWindow(QMainWindow):
         import os
         os._exit(0)
 
-
-    def _shutdown_project_session(self, clear_last_project=False):
-        """Common logic for closing a project session."""
-        # Save state before closing
-        self.save_project_state()
-        
-        # Clear state
-        self.project_manager.root_path = None
-        self.sidebar.model.setRootPath("")
-        self.setWindowTitle("Inkwell AI")
-        
-        # Close all tabs
-        self.editor.tabs.clear()
-        self.editor.open_files.clear()
-        
-        # Clear chat
-        if hasattr(self, 'chat_controller'):
-            self.chat_controller.save_current_chat_session()  # Save before clearing
-        self.chat.clear_chat()
-        if hasattr(self, 'chat_controller'):
-            self.chat_controller.chat_history = []
-        self._raw_ai_responses = []  # Clear raw responses tracking
-        
-        # Cancel RAG indexing worker immediately
-        try:
-            if hasattr(self, 'index_worker') and self.index_worker is not None:
-                self.index_worker.cancel()
-                self.index_worker = None
-        except Exception:
-            pass
-        self.rag_engine = None
-        
-        # Clear last project setting if requested (e.g. user explicitly closed project)
-        if clear_last_project:
-            self.settings.setValue("last_project", "")
-        
-        # Update Welcome Screen
-        self.update_welcome_screen()
-        self._update_token_dashboard(0)
+    # Project closing is now handled by ProjectController._shutdown_project_session()
 
     def open_settings_dialog(self):
         dialog = SettingsDialog(self)
@@ -867,9 +824,13 @@ class MainWindow(QMainWindow):
         else:
             self.editor.add_tab(self.image_gen, "Image Studio")
 
-    def on_file_double_clicked(self, index):
-        file_path = self.sidebar.model.filePath(index)
-        if not self.sidebar.model.isDir(index):
+    def on_file_double_clicked(self, file_path):
+        """Handle file double-click in sidebar.
+        
+        Args:
+            file_path: Full path to the file that was clicked
+        """
+        if os.path.isfile(file_path):
             # Check if already open to avoid overwriting unsaved changes
             if file_path in self.editor.open_files:
                 self.editor.open_file(file_path, None) # Content ignored if open
@@ -882,45 +843,6 @@ class MainWindow(QMainWindow):
                     content = self.project_manager.read_file(file_path)
                     if content is not None:
                         self.editor.open_file(file_path, content)
-
-    def handle_batch_edit(self, path, content):
-        instruction, ok = QInputDialog.getText(self, "Batch Edit", "Enter instruction for processing (e.g. 'Fix typos'):")
-        if ok and instruction:
-            # Create progress dialog
-            self.progress = QProgressDialog("Processing chunks...", "Cancel", 0, 100, self)
-            self.progress.setWindowModality(Qt.WindowModal)
-            self.progress.show()
-            
-            provider = self.get_llm_provider()
-            model = self.settings.value("ollama_model", "llama3")
-            
-            self.batch_worker = BatchWorker(provider, model, content, instruction)
-            self.batch_worker.progress_updated.connect(self.on_batch_progress)
-            self.batch_worker.finished.connect(lambda result: self.on_batch_finished(path, result))
-            self.batch_worker.error_occurred.connect(self.on_batch_error)
-            
-            self.progress.canceled.connect(self.batch_worker.cancel)
-            self.batch_worker.start()
-
-    def on_batch_progress(self, current, total):
-        self.progress.setMaximum(total)
-        self.progress.setValue(current)
-        self.progress.setLabelText(f"Processing chunk {current} of {total}...")
-
-    def on_batch_finished(self, path, result):
-        self.progress.close()
-        if result:
-            # check files open
-            if path in self.editor.open_files:
-                doc_widget = self.editor.open_files[path]
-                doc_widget.replace_content_undoable(result)
-                QMessageBox.information(self, "Batch Complete", "Batch processing finished. Changes applied to buffer.")
-            else:
-                 QMessageBox.warning(self, "Error", "File closed during processing.")
-    
-    def on_batch_error(self, error):
-        self.progress.close()
-        QMessageBox.critical(self, "Batch Error", f"An error occurred: {error}")
 
     def on_tool_finished(self, result_text, extra_data):
         self.chat.remove_thinking()

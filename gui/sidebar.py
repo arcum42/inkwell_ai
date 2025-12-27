@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QFileSystemModel, QHeaderView, QMenu, QInputDialog, QMessageBox, QFileDialog, QStyledItemDelegate
-from PySide6.QtCore import QDir, Qt, QFileInfo, Signal, QRect, QSize
-from PySide6.QtGui import QPainter, QColor, QBrush
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QFileSystemModel, QHeaderView, QMenu, QInputDialog, QMessageBox, QFileDialog, QStyledItemDelegate, QScrollArea, QLabel, QToolBar, QApplication, QStyle
+from PySide6.QtCore import QDir, Qt, QFileInfo, Signal, QRect, QSize, QAbstractItemModel, QModelIndex
+from PySide6.QtGui import QPainter, QColor, QBrush, QIcon, QAction
 import os
 import shutil
 
@@ -131,21 +131,110 @@ class ProjectTreeView(QTreeView):
         else:
             event.ignore()
 
-class Sidebar(QWidget):
+class CollapsibleHeader(QWidget):
+    """A clickable header that can expand/collapse a section."""
+    toggled = Signal(bool)  # emits True when expanded, False when collapsed
+    
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.is_expanded = True
+        self.title = title
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+        
+        self.setStyleSheet("background-color: #f5f5f5; border-bottom: 1px solid #ddd;")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMaximumHeight(30)
+        
+        # Header label with expand/collapse indicator
+        self.label = QLabel(f"▼ {title}")
+        font = self.label.font()
+        font.setBold(True)
+        self.label.setFont(font)
+        self.label.setStyleSheet("color: #666; padding: 2px 4px;")
+        layout.addWidget(self.label)
+    
+    def mousePressEvent(self, event):
+        """Toggle expanded state on click."""
+        self.is_expanded = not self.is_expanded
+        self.label.setText(f"{'▼' if self.is_expanded else '▶'} {self.title}")
+        self.toggled.emit(self.is_expanded)
+    
+    def set_expanded(self, expanded: bool):
+        """Set the expanded state without emitting signal."""
+        self.is_expanded = expanded
+        self.label.setText(f"{'▼' if self.is_expanded else '▶'} {self.title}")
+
+
+class ProjectSection(QWidget):
+    """A collapsible section containing a project's file tree with header."""
     file_renamed = Signal(str, str)  # old_path, new_path
     file_moved = Signal(str, str)    # old_path, new_path
-    def __init__(self, parent=None):
+    file_double_clicked = Signal(str)  # file_path
+    
+    def __init__(self, project_name: str, root_path: str, parent_sidebar=None, parent=None):
         super().__init__(parent)
+        self.project_name = project_name
+        self.root_path = root_path
+        self.parent_sidebar = parent_sidebar
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
         
+        # Create collapsible header
+        self.header = CollapsibleHeader(project_name)
+        self.header.toggled.connect(self._on_toggle_expanded)
+        self.layout.addWidget(self.header)
+        
+        # Create toolbar
+        self.toolbar = QToolBar()
+        self.toolbar.setIconSize(QSize(16, 16))
+        self.toolbar.setMovable(False)
+        self.toolbar.setFloatable(False)
+        self.toolbar.setStyleSheet("QToolBar { border: none; border-bottom: 1px solid #ddd; padding: 2px; }")
+        
+        # Get standard icons from application style
+        style = QApplication.instance().style()
+        
+        # New File
+        new_file_act = QAction(style.standardIcon(QStyle.SP_FileIcon), "New File", self)
+        new_file_act.setStatusTip("Create a new file")
+        new_file_act.triggered.connect(lambda: self.create_new_file())
+        self.toolbar.addAction(new_file_act)
+        
+        # New Folder
+        new_folder_act = QAction(style.standardIcon(QStyle.SP_DirIcon), "New Folder", self)
+        new_folder_act.setStatusTip("Create a new folder")
+        new_folder_act.triggered.connect(lambda: self.create_new_folder())
+        self.toolbar.addAction(new_folder_act)
+        
+        self.toolbar.addSeparator()
+        
+        # Rename
+        rename_act = QAction(QIcon.fromTheme("edit-rename"), "Rename", self)
+        if rename_act.icon().isNull():
+            rename_act.setIcon(style.standardIcon(QStyle.SP_FileDialogDetailedView))
+        rename_act.setStatusTip("Rename selected file/folder")
+        rename_act.triggered.connect(lambda: self._on_toolbar_rename())
+        self.toolbar.addAction(rename_act)
+        
+        # Delete
+        delete_act = QAction(QIcon.fromTheme("edit-delete"), "Delete", self)
+        if delete_act.icon().isNull():
+            delete_act.setIcon(style.standardIcon(QStyle.SP_TrashIcon))
+        delete_act.setStatusTip("Delete selected file/folder")
+        delete_act.triggered.connect(lambda: self._on_toolbar_delete())
+        self.toolbar.addAction(delete_act)
+        
+        self.layout.addWidget(self.toolbar)
+        
+        # Create model and tree for this project
         self.model = QFileSystemModel()
-        # Don't set root path immediately to avoid showing system root
-        # self.model.setRootPath(QDir.rootPath())
-        
         self.tree = ProjectTreeView()
         self.tree.setModel(self.model)
-        # self.tree.setRootIndex(self.model.index(QDir.rootPath()))
         
         # Set up custom delegate for index status indicators
         self.delegate = IndexStatusDelegate(self.tree)
@@ -162,10 +251,45 @@ class Sidebar(QWidget):
         
         # Allow model writes (rename via model etc.)
         self.model.setReadOnly(False)
-        # Relay DnD moves to sidebar signal
+        
+        # Relay signals
         self.tree.moved.connect(lambda old, new: self.file_moved.emit(old, new))
-
-        self.layout.addWidget(self.tree)
+        self.tree.doubleClicked.connect(self._on_tree_double_clicked)
+        
+        # Add tree with stretch
+        self.layout.addWidget(self.tree, 1)
+        
+        # Set the root path
+        self.set_root_path(root_path)
+    
+    def _on_toggle_expanded(self, is_expanded: bool):
+        """Handle expand/collapse toggle."""
+        self.tree.setVisible(is_expanded)
+        # Adjust stretch factor so collapsed sections don't reserve space
+        self.layout.setStretchFactor(self.tree, 1 if is_expanded else 0)
+        # Notify parent to update layout stretch
+        self.toggled = Signal(bool)
+        # Emit custom signal that parent sidebar can catch
+        if hasattr(self, 'parent_sidebar'):
+            self.parent_sidebar._on_section_toggled(self, is_expanded)
+    
+    def _on_toolbar_rename(self):
+        """Rename the currently selected item."""
+        index = self.tree.currentIndex()
+        if index.isValid():
+            self.rename_item(index)
+    
+    def _on_toolbar_delete(self):
+        """Delete the currently selected item."""
+        index = self.tree.currentIndex()
+        if index.isValid():
+            self.delete_item(index)
+    
+    def _on_tree_double_clicked(self, index):
+        """Relay double-click to parent with full file path."""
+        if index.isValid():
+            file_path = self.model.filePath(index)
+            self.file_double_clicked.emit(file_path)
     
     def set_rag_engine(self, rag_engine):
         """Set the RAG engine for the delegate to check index status."""
@@ -219,8 +343,12 @@ class Sidebar(QWidget):
         else:
             return os.path.dirname(self.model.filePath(index))
 
-    def create_new_file(self, index):
-        target_dir = self.get_target_dir(index)
+    def create_new_file(self, index=None):
+        # If called from toolbar without index, use root path
+        if index is None:
+            target_dir = self.root_path
+        else:
+            target_dir = self.get_target_dir(index)
         name, ok = QInputDialog.getText(self, "New File", "Filename:")
         if ok and name:
             path = os.path.join(target_dir, name)
@@ -230,8 +358,12 @@ class Sidebar(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Could not create file: {e}")
 
-    def create_new_folder(self, index):
-        target_dir = self.get_target_dir(index)
+    def create_new_folder(self, index=None):
+        # If called from toolbar without index, use root path
+        if index is None:
+            target_dir = self.root_path
+        else:
+            target_dir = self.get_target_dir(index)
         name, ok = QInputDialog.getText(self, "New Folder", "Folder Name:")
         if ok and name:
             path = os.path.join(target_dir, name)
@@ -246,8 +378,6 @@ class Sidebar(QWidget):
         if confirm == QMessageBox.Yes:
             try:
                 if self.model.isDir(index):
-                    # QFileSystemModel doesn't have recursive delete built-in easily accessible via model
-                    # Use QDir or os
                     import shutil
                     shutil.rmtree(path)
                 else:
@@ -309,4 +439,139 @@ class Sidebar(QWidget):
             self.file_moved.emit(old_path, new_path)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not move: {e}")
+
+
+class Sidebar(QWidget):
+    """Main sidebar with collapsible file tree sections: Project and Assets."""
+    file_renamed = Signal(str, str)  # old_path, new_path
+    file_moved = Signal(str, str)    # old_path, new_path
+    file_double_clicked = Signal(str)  # file_path
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        
+        # Store project sections
+        self.project_sections = {}  # section_name -> ProjectSection
+        
+        # Add stretch at the end to push sections to the top
+        self.layout.addStretch()
+    
+    def add_project(self, project_name: str, root_path: str):
+        """Add a collapsible project section to the sidebar.
+        
+        Args:
+            project_name: Name of the section (e.g., "Project", "Inkwell Assets")
+            root_path: Root path of the folder
+        """
+        if not os.path.isdir(root_path):
+            print(f"Warning: {project_name} folder not found at {root_path}")
+            return
+        
+        # Remove the stretch temporarily
+        self.layout.removeItem(self.layout.itemAt(self.layout.count() - 1))
+        
+        # Format the display name
+        if project_name == "Project":
+            # Show "Project: folder_name"
+            folder_name = os.path.basename(root_path.rstrip('/\\'))
+            display_name = f"Project: {folder_name}"
+        elif project_name == "Assets":
+            # Use "Inkwell Assets" instead
+            display_name = "Inkwell Assets"
+        else:
+            display_name = project_name
+        
+        # Create and add project section (with built-in collapsible header)
+        section = ProjectSection(display_name, root_path, parent_sidebar=self)
+        section.file_renamed.connect(self.file_renamed.emit)
+        section.file_moved.connect(self.file_moved.emit)
+        section.file_double_clicked.connect(self.file_double_clicked.emit)
+        
+        # Add section with stretch=1 so expanded sections grow to fill space
+        self.layout.addWidget(section, 1)
+        
+        # Add stretch back at the end to keep sections at the top when both collapsed
+        self.layout.addStretch()
+        
+        self.project_sections[project_name] = section
+    
+    def _on_section_toggled(self, section: 'ProjectSection', is_expanded: bool):
+        """Handle a section being expanded or collapsed."""
+        # Update the section's stretch factor based on expansion state
+        self.layout.setStretchFactor(section, 1 if is_expanded else 0)
+    
+    def remove_project(self, project_name: str):
+        """Remove a project section from the sidebar."""
+        if project_name in self.project_sections:
+            section = self.project_sections.pop(project_name)
+            # Find and remove the section and its header from the layout
+            for i in range(self.layout.count() - 1, -1, -1):
+                widget = self.layout.itemAt(i).widget()
+                if widget == section:
+                    self.layout.removeWidget(section)
+                    section.deleteLater()
+                    # Also remove header (the item before it if it's a label)
+                    if i > 0:
+                        prev_widget = self.layout.itemAt(i - 1).widget()
+                        if isinstance(prev_widget, QLabel) and prev_widget.text() == project_name:
+                            self.layout.removeWidget(prev_widget)
+                            prev_widget.deleteLater()
+                    break
+    
+    def get_project_section(self, project_name: str):
+        """Get a project section by name."""
+        return self.project_sections.get(project_name)
+    
+    def set_rag_engine(self, rag_engine, project_name: str = "Project"):
+        """Set the RAG engine for a specific project section."""
+        if project_name in self.project_sections:
+            self.project_sections[project_name].set_rag_engine(rag_engine)
+    
+    def update_file_status(self, project_name: str = "Project"):
+        """Force repaint to update file status indicators."""
+        if project_name in self.project_sections:
+            self.project_sections[project_name].update_file_status()
+
+    def set_root_path(self, path):
+        """Updates the tree view to show the specified path (backward compatibility)."""
+        if "Project" in self.project_sections:
+            self.project_sections["Project"].set_root_path(path)
+    
+    @property
+    def model(self):
+        """Backward compatibility: return main project model."""
+        if "Project" in self.project_sections:
+            return self.project_sections["Project"].model
+        return None
+    
+    @property
+    def tree(self):
+        """Backward compatibility: return main project tree."""
+        if "Project" in self.project_sections:
+            return self.project_sections["Project"].tree
+        return None
+    
+    # Backward compatibility methods
+    def create_new_file(self, index):
+        """Delegate to Project section."""
+        if "Project" in self.project_sections:
+            self.project_sections["Project"].create_new_file(index)
+    
+    def create_new_folder(self, index):
+        """Delegate to Project section."""
+        if "Project" in self.project_sections:
+            self.project_sections["Project"].create_new_folder(index)
+    
+    def rename_item(self, index):
+        """Delegate to Project section."""
+        if "Project" in self.project_sections:
+            self.project_sections["Project"].rename_item(index)
+    
+    def move_item(self, index):
+        """Delegate to Project section."""
+        if "Project" in self.project_sections:
+            self.project_sections["Project"].move_item(index)
 
