@@ -11,3 +11,5 @@ pyspellchecker
 beautifulsoup4
 ddgs
 lxml
+
+jsonschema
