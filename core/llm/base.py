@@ -8,6 +8,11 @@ class LLMProvider:
     # Default: False (provider implements chat_stream with fallback to chat())
     # Set to True when provider has real streaming implementation
     supports_streaming = False
+
+    # Class attribute indicating if this provider supports structured (JSON schema) output
+    # Default: False. Providers should set to True if they can accept a schema
+    # and return structured responses matching it.
+    supports_structured_output = False
     
     def chat(self, messages, model=None):
         """Send a chat message to the LLM.

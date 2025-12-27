@@ -23,6 +23,8 @@ class LMStudioNativeProvider(LLMProvider):
     
     # Native SDK's respond_stream() method provides real token-by-token streaming
     supports_streaming = True
+    # Native SDK supports structured responses via response_format
+    supports_structured_output = True
     
     def __init__(self, base_url: str = "localhost:1234"):
         """Initialize LM Studio native provider.
@@ -50,7 +52,7 @@ class LMStudioNativeProvider(LLMProvider):
         except Exception as e:
             print(f"Warning: Could not verify LM Studio connection: {e}")
     
-    def chat(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None) -> str:
+    def chat(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None, response_format: Optional[dict] = None) -> str:
         """Send chat message to LM Studio using native SDK.
         
         Args:
@@ -81,9 +83,21 @@ class LMStudioNativeProvider(LLMProvider):
             self._emit_progress(progress_callback, "sending")
             
             # Generate response
-            result = llm_model.respond(chat)
+            # Generate response (structured if response_format is provided)
+            if response_format is not None:
+                result = llm_model.respond(chat, response_format=response_format)
+            else:
+                result = llm_model.respond(chat)
             self._emit_progress(progress_callback, "complete")
-            return result.content
+            # Return content as string; if structured returns dict-like, serialize
+            content = getattr(result, 'content', result)
+            try:
+                import json
+                if isinstance(content, (dict, list)):
+                    return json.dumps(content, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            return str(content)
             
         except Exception as e:
             self._emit_progress(progress_callback, "error", str(e))

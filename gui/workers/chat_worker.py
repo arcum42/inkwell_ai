@@ -13,7 +13,7 @@ class ChatWorker(QThread):
     response_thinking_done = Signal()  # Signal when thinking phase ends
     progress_update = Signal(str)  # Emit human-readable progress updates
 
-    def __init__(self, provider, chat_history, model, context, system_prompt, images=None, enabled_tools=None, mode="edit"):
+    def __init__(self, provider, chat_history, model, context, system_prompt, images=None, enabled_tools=None, mode="edit", structured_enabled: bool = False, schema_id: str | None = None):
         super().__init__()
         self.provider = provider
         # Create a copy of the history so we don't modify the original reference if we tweak it for the API
@@ -24,6 +24,9 @@ class ChatWorker(QThread):
         self.images = images
         self.enabled_tools = enabled_tools  # Optional set of enabled tool names
         self.mode = mode  # "edit" or "ask"
+        # Structured responses (opt-in)
+        self.structured_enabled = bool(structured_enabled)
+        self.schema_id = schema_id
 
     def run(self):
         # Construct the messages list for the LLM
@@ -123,8 +126,22 @@ class ChatWorker(QThread):
                 if msg:
                     self.progress_update.emit(msg)
             
+            # Structured responses: prefer non-streaming path initially
+            use_structured = False
+            response_format = None
+            if self.structured_enabled and getattr(self.provider, 'supports_structured_output', False):
+                try:
+                    from core.llm.schemas import get_entry
+                    entry = get_entry(self.schema_id) if self.schema_id else None
+                    provider_name = type(self.provider).__name__
+                    if entry and (entry.get('providers') is None or provider_name in entry.get('providers', [])):
+                        response_format = entry.get('schema')
+                        use_structured = response_format is not None
+                except Exception:
+                    use_structured = False
+
             # Check if provider supports streaming
-            if self.provider.supports_streaming:
+            if self.provider.supports_streaming and not use_structured:
                 # Use streaming - provider has real streaming capability
                 full_response = ""
                 thinking_started = False
@@ -201,9 +218,15 @@ class ChatWorker(QThread):
             else:
                 # Fall back to non-streaming
                 try:
-                    response = self.provider.chat(messages, model=self.model, progress_callback=emit_progress)
+                    if use_structured:
+                        response = self.provider.chat(messages, model=self.model, progress_callback=emit_progress, response_format=response_format)
+                    else:
+                        response = self.provider.chat(messages, model=self.model, progress_callback=emit_progress)
                 except TypeError:
-                    response = self.provider.chat(messages, model=self.model)
+                    if use_structured:
+                        response = self.provider.chat(messages, model=self.model)
+                    else:
+                        response = self.provider.chat(messages, model=self.model)
                 self.response_received.emit(response)
         except Exception as e:
             import traceback
