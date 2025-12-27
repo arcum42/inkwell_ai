@@ -126,7 +126,7 @@ class ChatWorker(QThread):
                 if msg:
                     self.progress_update.emit(msg)
             
-            # Structured responses: prefer non-streaming path initially
+            # Structured responses: determine response_format if enabled
             use_structured = False
             response_format = None
             if self.structured_enabled and getattr(self.provider, 'supports_structured_output', False):
@@ -141,7 +141,7 @@ class ChatWorker(QThread):
                     use_structured = False
 
             # Check if provider supports streaming
-            if self.provider.supports_streaming and not use_structured:
+            if self.provider.supports_streaming:
                 # Use streaming - provider has real streaming capability
                 full_response = ""
                 thinking_started = False
@@ -163,7 +163,11 @@ class ChatWorker(QThread):
                     return 0
 
                 try:
-                    stream_iter = self.provider.chat_stream(messages, model=self.model, progress_callback=emit_progress)
+                    # Pass response_format when structured; providers that don't accept it will raise TypeError
+                    if use_structured:
+                        stream_iter = self.provider.chat_stream(messages, model=self.model, progress_callback=emit_progress, response_format=response_format)
+                    else:
+                        stream_iter = self.provider.chat_stream(messages, model=self.model, progress_callback=emit_progress)
                 except TypeError:
                     stream_iter = self.provider.chat_stream(messages, model=self.model)
 

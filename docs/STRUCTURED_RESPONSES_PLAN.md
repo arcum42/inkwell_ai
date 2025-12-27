@@ -41,6 +41,13 @@
   - Add streaming-compatible UX; preserve thinking indicators.
   - Acceptance: Streaming responses render structured at end with correct fallbacks.
 
+### Status Update (Phase 4)
+- Implemented structured streaming for LM Studio Native:
+  - `LMStudioNativeProvider.chat_stream()` accepts `response_format` and streams tokens.
+  - `ChatWorker` streams in structured mode, buffers tokens, and emits the full response on completion.
+  - Controller replaces streamed text with parsed/validated structured rendering at end.
+- Next: refine streaming UX (inline collapsible JSON, badge polish).
+
 ## Lifecycle States (Runtime)
 - Global Off: Structured disabled; all providers return standard text.
 - On + Unsupported Provider: Ignore schema; warn user if schema was selected.
@@ -139,10 +146,19 @@
 - Project-level schema overrides (e.g., `.inkwell/config.json`) and user-added schemas in the registry.
 - Structured diffs piped directly into DiffDialog without ad-hoc string parsing.
 
+### Status Update (2025-12-27)
+- Implemented tool overrides returning `tool_result`:
+  - `SEARCH` (DuckDuckGo web search)
+  - `WEB_READ` (web page reader)
+  - `WIKI` (Wikipedia summaries)
+  - `IMAGE` (DuckDuckGo image search)
+- Controller auto-selects `tool_result` when schema dropdown is None and a tool-preferred schema is available.
+
+
 ## Execution Checklist (Prep for Implementation)
-- [ ] Add capability flag to providers and wire global/per-request toggles through controller/worker.
-- [ ] Build schema registry with starter schemas and provider allowlists.
-- [ ] Implement LM Studio Native request path for `response_format` and response parsing.
-- [ ] Add UI hooks: settings checkbox, chat schema dropdown, response badges/toggles.
-- [ ] Add validation/fallback logic and metadata logging.
+- [x] Add capability flag to providers and wire global/per-request toggles through controller/worker.
+- [x] Build schema registry with starter schemas and provider allowlists.
+- [x] Implement LM Studio Native request path for `response_format` and response parsing.
+- [x] Add UI hooks: settings checkbox, chat schema dropdown, response badges/toggles.
+- [x] Add validation/fallback logic and metadata logging.
 - [ ] Cover with targeted tests and update docs.

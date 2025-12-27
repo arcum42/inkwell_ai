@@ -103,7 +103,7 @@ class LMStudioNativeProvider(LLMProvider):
             self._emit_progress(progress_callback, "error", str(e))
             return f"Error: {e}"
     
-    def chat_stream(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None):
+    def chat_stream(self, messages: list, model: str = None, progress_callback: Optional[Callable[[Any], None]] = None, response_format: Optional[dict] = None):
         """Stream chat response token-by-token using native SDK.
         
         Uses the native SDK's respond_stream() method to yield fragments
@@ -136,7 +136,14 @@ class LMStudioNativeProvider(LLMProvider):
             self._emit_progress(progress_callback, "receiving")
             
             # Stream response using native SDK
-            for fragment in llm_model.respond_stream(chat):
+            # Structured streaming: pass response_format when provided. If unsupported,
+            # the SDK will raise; we fall back to plain streaming.
+            try:
+                stream_source = llm_model.respond_stream(chat, response_format=response_format) if response_format is not None else llm_model.respond_stream(chat)
+            except Exception:
+                stream_source = llm_model.respond_stream(chat)
+
+            for fragment in stream_source:
                 content = fragment.content if hasattr(fragment, 'content') else str(fragment)
                 if content:
                     yield content

@@ -23,6 +23,10 @@ class WikiTool(Tool):
             "include_link": {"default": True, "type": "bool", "description": "Include Wikipedia link in response"},
         }
 
+    def get_preferred_schema_id(self):
+        """Suggest structured schema for Wikipedia summaries."""
+        return "tool_result"
+
     def execute(self, query: str, settings=None):
         """Search Wikipedia.
 

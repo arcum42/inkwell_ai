@@ -23,6 +23,10 @@ class WebReader(Tool):
             "max_length": {"default": 10000, "type": "int", "description": "Maximum characters to return"},
         }
 
+    def get_preferred_schema_id(self):
+        """Suggest structured schema for page content results."""
+        return "tool_result"
+
     def execute(self, query: str, settings=None):
         """Read content from a web page.
 

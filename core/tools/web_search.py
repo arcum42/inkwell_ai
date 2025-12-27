@@ -21,6 +21,10 @@ class WebSearcher(Tool):
         """Check if DuckDuckGo search is available."""
         return ddg_available()
 
+    def get_preferred_schema_id(self):
+        """Suggest structured schema for search results."""
+        return "tool_result"
+
     def execute(self, query: str, settings=None):
         """Search the web.
 

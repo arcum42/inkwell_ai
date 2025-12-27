@@ -543,13 +543,22 @@ class ChatWidget(QWidget):
         enabled = bool(settings.value("structured_enabled", False, type=bool))
         sid = settings.value("structured_schema_id", "None")
         if enabled and sid and sid != "None":
-            self.structured_indicator.setText(f"Structured: {sid}")
-            self.structured_indicator.setStyleSheet("font-size: 9pt; color: #2a7;")
+            # Chip-style badge for active structured mode with schema
+            self.structured_indicator.setText(f"🧩 {sid}")
+            self.structured_indicator.setStyleSheet(
+                "font-size: 9pt; color: #fff; background: #2196F3; "
+                "padding: 2px 8px; border-radius: 12px; font-weight: bold;"
+            )
         elif enabled:
-            self.structured_indicator.setText("Structured: None")
-            self.structured_indicator.setStyleSheet("font-size: 9pt; color: #885;")
+            # Chip badge showing structured mode active but no schema
+            self.structured_indicator.setText("🧩 Structured")
+            self.structured_indicator.setStyleSheet(
+                "font-size: 9pt; color: #fff; background: #FF9800; "
+                "padding: 2px 8px; border-radius: 12px; font-weight: bold;"
+            )
         else:
-            self.structured_indicator.setText("Structured: Off")
+            # Subtle indicator when off
+            self.structured_indicator.setText("")
             self.structured_indicator.setStyleSheet("font-size: 9pt; color: #555;")
 
     def on_anchor_clicked(self, url):
@@ -727,14 +736,17 @@ class ChatWidget(QWidget):
                     self._scroll_to_bottom(force=True)
                 return
         
-        # Add JSON view link if raw_text looks like JSON
+        # Add JSON view link for assistant messages with valid JSON
         json_link = ""
-        try:
-            raw_sample = raw_text.strip() if raw_text else ""
-            if raw_sample.startswith("{") or raw_sample.startswith("["):
-                json_link = f'<a href="json:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-left: 10px;">🧩 JSON</a>'
-        except Exception:
-            pass
+        if sender == "Assistant":
+            try:
+                raw_sample = raw_text.strip() if raw_text else ""
+                if raw_sample.startswith("{") or raw_sample.startswith("["):
+                    import json
+                    json.loads(raw_sample)
+                    json_link = f'<a href="json:{msg_index}" style="color: #666; font-size: 9pt; text-decoration: none; margin-left: 10px;">🧩 JSON</a>'
+            except Exception:
+                pass
 
         # Choose display text based on view mode
         display_text = (raw_text or text) if self.raw_view else text
