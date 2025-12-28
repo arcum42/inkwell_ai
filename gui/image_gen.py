@@ -30,7 +30,9 @@ class ImageGenWidget(QWidget):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.workflow_manager = WorkflowManager()
+        # Get assets folder from settings (defaults to "assets")
+        assets_folder = self.settings.value("assets_folder", "assets")
+        self.workflow_manager = WorkflowManager(assets_folder)
         self.client = None # Initialized on generate
         
         self.layout = QVBoxLayout(self)

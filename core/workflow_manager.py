@@ -3,8 +3,12 @@ import os
 import re
 
 class WorkflowManager:
-    def __init__(self, workflows_dir="workflows"):
-        self.workflows_dir = workflows_dir
+    def __init__(self, assets_dir=None):
+        if assets_dir is None:
+            # Default to assets folder
+            assets_dir = "assets"
+        # Workflows are stored in assets_dir/workflows
+        self.workflows_dir = os.path.join(assets_dir, "workflows")
         self.workflows = {} # name -> json_content
         self.reload_workflows()
 
