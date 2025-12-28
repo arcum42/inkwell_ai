@@ -1,7 +1,7 @@
 """Plain text editor with Markdown formatting and spell-checking capabilities."""
 
 import re
-from PySide6.QtWidgets import QPlainTextEdit, QMenu
+from PySide6.QtWidgets import QPlainTextEdit, QMenu, QTextEdit
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QTextCursor, QTextFormat, QColor, QTextCharFormat
 from PySide6.QtCore import Qt, QTimer
@@ -75,22 +75,23 @@ class CodeEditor(QPlainTextEdit):
         self._highlight_misspelled(misspelled)
     
     def _highlight_misspelled(self, misspelled_words: set):
-        """Highlight misspelled words with red underline.
+        """Highlight misspelled words with red underline using extra selections.
+        
+        This approach doesn't modify the document, so it doesn't affect undo/redo.
         
         Args:
             misspelled_words: Set of misspelled words
         """
         self.misspelled_words = misspelled_words
-        # Preserve document modified state so spell-check formatting doesn't re-flag the tab
-        doc = self.document()
-        was_modified = doc.isModified()
         
         # Create format for misspelled words (red wavy underline)
         misspelled_format = QTextCharFormat()
         misspelled_format.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
         misspelled_format.setUnderlineColor(QColor(255, 0, 0))  # Red
         
-        # Apply formatting to all misspelled words
+        # Build list of extra selections for misspelled words
+        extra_selections = []
+        doc = self.document()
         cursor = QTextCursor(doc)
         
         while not cursor.atEnd():
@@ -101,16 +102,16 @@ class CodeEditor(QPlainTextEdit):
             alpha_word = re.sub(r'[^a-z]', '', word)
             
             if alpha_word in misspelled_words:
-                cursor.setCharFormat(misspelled_format)
-            else:
-                # Reset format
-                cursor.setCharFormat(QTextCharFormat())
+                # Create a proper QTextEdit.ExtraSelection object
+                selection = QTextEdit.ExtraSelection()
+                selection.format = misspelled_format
+                extra_selections.append(selection)
             
             cursor.movePosition(QTextCursor.NextWord)
         
-        # Restore original modified flag
-        if doc.isModified() != was_modified:
-            doc.setModified(was_modified)
+        # Apply all extra selections at once
+        # This doesn't modify the document or affect undo/redo
+        self.setExtraSelections(extra_selections)
     
     def contextMenuEvent(self, event):
         """Handle right-click context menu with spell-check suggestions."""

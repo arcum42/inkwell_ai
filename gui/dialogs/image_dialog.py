@@ -21,7 +21,7 @@ class ImageDownloader(QThread):
                 pass
 
 class ImageSelectionDialog(QDialog):
-    def __init__(self, results, project_path, parent=None):
+    def __init__(self, results, project_path, parent=None, on_next_page=None, on_prev_page=None, current_page=1, has_search_context=False):
         super().__init__(parent)
         self.setWindowTitle("Select Image")
         self.resize(800, 600)
@@ -29,8 +29,18 @@ class ImageSelectionDialog(QDialog):
         self.project_path = project_path
         self.selected_indices = set()
         self.saved_paths = []
+        self.on_next_page = on_next_page
+        self.on_prev_page = on_prev_page
+        self.current_page = current_page
+        self.has_search_context = has_search_context
         
         self.layout = QVBoxLayout(self)
+        
+        # Page info label (if pagination available)
+        if has_search_context:
+            self.page_label = QLabel(f"Page {current_page}")
+            self.page_label.setAlignment(Qt.AlignCenter)
+            self.layout.addWidget(self.page_label)
         
         # Grid area
         scroll = QScrollArea()
@@ -73,6 +83,27 @@ class ImageSelectionDialog(QDialog):
             self.grid_layout.addWidget(container, i // 3, i % 3)
             self.image_widgets[i] = lbl
             
+        # Filename and pagination controls
+        controls_layout = QVBoxLayout()
+        
+        # Pagination buttons (if available)
+        if has_search_context:
+            pagination_layout = QHBoxLayout()
+            
+            prev_btn = QPushButton("← Previous Page")
+            prev_btn.clicked.connect(self.on_prev_clicked)
+            if current_page <= 1:
+                prev_btn.setEnabled(False)
+            pagination_layout.addWidget(prev_btn)
+            
+            pagination_layout.addStretch()
+            
+            next_btn = QPushButton("Next Page →")
+            next_btn.clicked.connect(self.on_next_clicked)
+            pagination_layout.addWidget(next_btn)
+            
+            controls_layout.addLayout(pagination_layout)
+        
         # Filename input
         input_layout = QHBoxLayout()
         input_layout.addWidget(QLabel("Save as:"))
@@ -83,7 +114,20 @@ class ImageSelectionDialog(QDialog):
         save_btn.clicked.connect(self.save_image)
         input_layout.addWidget(save_btn)
         
-        self.layout.addLayout(input_layout)
+        controls_layout.addLayout(input_layout)
+        self.layout.addLayout(controls_layout)
+        
+    def on_prev_clicked(self):
+        """Handle previous page button click."""
+        if self.on_prev_page:
+            self.reject()  # Close dialog to trigger pagination
+            self.on_prev_page()
+    
+    def on_next_clicked(self):
+        """Handle next page button click."""
+        if self.on_next_page:
+            self.reject()  # Close dialog to trigger pagination
+            self.on_next_page()
         
     def on_image_loaded(self, index, data):
         if index in self.image_widgets:
@@ -158,6 +202,36 @@ class ImageSelectionDialog(QDialog):
                 with open(target_path, 'wb') as f:
                     f.write(response.content)
                 
+                # Write tags/description to a companion .txt file
+                try:
+                    base, _ext = os.path.splitext(target_path)
+                    txt_path = base + ".txt"
+                    tags = self.results[idx].get('tags') or []
+                    if isinstance(tags, list):
+                        tag_str = ", ".join([t for t in tags if isinstance(t, str)])
+                    else:
+                        tag_str = ""
+                    desc = self.results[idx].get('description') or ""
+                    src = self.results[idx].get('source_url') or ""
+                    uploader = self.results[idx].get('uploader') or ""
+                    lines = []
+                    if tag_str:
+                        lines.append(f"Tags: {tag_str}")
+                    if uploader:
+                        lines.append(f"Uploader: {uploader}")
+                    if src:
+                        lines.append(f"Source: {src}")
+                    if desc:
+                        lines.append("")
+                        lines.append("Description:")
+                        lines.append(desc)
+                    # Ensure there's at least tags line; write empty file otherwise
+                    with open(txt_path, 'w', encoding='utf-8') as tf:
+                        tf.write("\n".join(lines))
+                except Exception as e:
+                    # Non-fatal; image saved successfully
+                    print(f"Warning: Failed to write tags file for {target_path}: {e}")
+
                 self.saved_paths.append(target_path)
                 saved_count += 1
             except Exception as e:

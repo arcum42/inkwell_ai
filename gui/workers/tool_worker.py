@@ -15,6 +15,7 @@ class ToolWorker(QThread):
         self.query = query
         self.enabled_tools = enabled_tools  # Optional set of allowed tool names
         self.project_manager = project_manager  # For accessing tool settings
+        self.extra_settings = {}  # Additional settings (e.g., page, sort) set by caller
 
     def run(self):
         """Execute the requested tool."""
@@ -33,10 +34,16 @@ class ToolWorker(QThread):
                 self.finished.emit(f"Error: Tool '{self.tool_name}' is not available (missing dependencies)", None)
                 return
             
-            # Get tool settings from project config
+            # Merge project settings with extra_settings
             settings = None
             if self.project_manager:
                 settings = self.project_manager.get_tool_settings(self.tool_name)
+            
+            # Merge extra_settings (e.g., page, sort) on top of project settings
+            if self.extra_settings:
+                if settings is None:
+                    settings = {}
+                settings.update(self.extra_settings)
             
             # Execute the tool with settings
             result_text, extra_data = tool.execute(self.query, settings=settings)

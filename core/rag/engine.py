@@ -491,6 +491,35 @@ class RAGEngine:
         else:
             print("[RAG] No excluded files found in database.")
     
+    def remove_file(self, file_path: str):
+        """Remove all chunks for a specific file from the index.
+        
+        Args:
+            file_path: Path to the file to remove from index
+        """
+        # Find all chunk IDs for this file
+        all_docs = self.collection.get()
+        if not all_docs['ids']:
+            return
+        
+        file_ids = []
+        for doc_id, metadata in zip(all_docs['ids'], all_docs['metadatas']):
+            if metadata.get('source') == file_path:
+                file_ids.append(doc_id)
+        
+        if file_ids:
+            self.collection.delete(ids=file_ids)
+            # Also remove from BM25 index and chunk tracking
+            self._all_chunks = [(cid, doc) for cid, doc in self._all_chunks if cid not in file_ids]
+            if self._all_chunks:
+                self.bm25.index([doc for _, doc in self._all_chunks])
+            # Remove from indexed files tracking
+            if file_path in self._indexed_files:
+                del self._indexed_files[file_path]
+            # Clear cache since index changed
+            self.query_cache.invalidate_file(file_path)
+            print(f"[RAG] Removed {len(file_ids)} chunks for {file_path}")
+    
     def index_project(self):
         """Walks the project and indexes all markdown files."""
         # Invalidate entire cache for bulk reindexing

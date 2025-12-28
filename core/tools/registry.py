@@ -8,6 +8,9 @@ from .web_search import WebSearcher
 from .wikipedia_tool import WikiTool
 from .image_search import ImageSearcher
 from .image_gen_tool import ImageGenTool
+from .derpibooru_tool import DerpibooruTool
+from .tantabus_tool import TantabusTool
+from .e621_tool import E621Tool
 
 # Map of tool names to their classes for conditional registration
 AVAILABLE_TOOLS: Dict[str, Type[Tool]] = {
@@ -16,6 +19,9 @@ AVAILABLE_TOOLS: Dict[str, Type[Tool]] = {
     "WIKI": WikiTool,
     "IMAGE": ImageSearcher,
     "GENERATE_IMAGE": ImageGenTool,
+    "DERPIBOORU": DerpibooruTool,
+    "TANTABUS": TantabusTool,
+    "E621": E621Tool,
 }
 
 

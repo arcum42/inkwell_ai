@@ -1,3 +1,4 @@
+from typing import Any, Optional, Tuple
 from core.tool_base import Tool
 from .util import ddg_available, ddg_images
 
@@ -16,6 +17,21 @@ class ImageSearcher(Tool):
     @property
     def requires_libraries(self) -> list:
         return ["duckduckgo_search"]
+
+    def has_dialog(self) -> bool:
+        """This tool has a UI dialog for direct invocation."""
+        return True
+    
+    def show_dialog(self, parent=None) -> Optional[Tuple[str, Optional[Any]]]:
+        """Show search dialog for image search."""
+        try:
+            from gui.dialogs.image_search_dialog import ImageSearchDialog
+            dialog = ImageSearchDialog(parent)
+            if dialog.exec():
+                return (dialog.get_query(), None)
+        except Exception as e:
+            print(f"Error showing image search dialog: {e}")
+        return None
 
     def get_configurable_settings(self):
         """Return configurable settings for this tool."""

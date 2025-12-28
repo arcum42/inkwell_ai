@@ -240,44 +240,33 @@ class LMStudioNativeProvider(LLMProvider):
             return []
 
     def get_loaded_models(self, refresh: bool = False) -> Optional[List[str]]:
-        """Return models currently loaded by LM Studio when available.
+        """Return models currently loaded by LM Studio using the native SDK.
         
         Returns None when the status cannot be determined.
         """
         if not refresh and self._loaded_cache and (time.time() - self._loaded_cache_ts) < 10:
             return list(self._loaded_cache)
         try:
-            import requests
-            base = self._normalize_url(self.base_url)
-            response = requests.get(f"{base}/v1/models", timeout=5)
-            response.raise_for_status()
-            data = response.json()
-
-            loaded: List[str] = []
-            for m in data.get("data", []):
-                mid = self._get_model_id(m)
-                if not mid:
-                    continue
-                meta = m if isinstance(m, dict) else {}
-                flags = [
-                    meta.get("loaded"),
-                    meta.get("isLoaded"),
-                    meta.get("is_loaded"),
-                    meta.get("isDefault"),
-                    meta.get("default"),
-                ]
-                state = str(meta.get("state") or meta.get("status") or "").lower()
-                if any(bool(f) for f in flags) or state in ("loaded", "ready", "active", "running"):
-                    loaded.append(mid)
-            if not loaded:
-                ids = [self._get_model_id(m) for m in data.get("data", []) if self._get_model_id(m)]
-                if len(ids) == 1:
-                    loaded = ids
+            import lmstudio as lms
+            
+            # Use SDK's list_loaded_models() which returns LLM objects
+            loaded_llms = lms.list_loaded_models()
+            
+            # Extract identifiers from LLM objects
+            loaded = []
+            for llm_obj in loaded_llms:
+                # LLM objects have an 'identifier' property
+                identifier = getattr(llm_obj, 'identifier', None)
+                if identifier:
+                    loaded.append(identifier)
+            
             self._loaded_cache = loaded
             self._loaded_cache_ts = time.time()
             return loaded
         except Exception as e:
             print(f"Error checking loaded LM Studio models: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def is_model_loaded(self, model_name: Optional[str]) -> Optional[bool]:

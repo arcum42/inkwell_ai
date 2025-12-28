@@ -13,8 +13,9 @@ import re
 import uuid
 import hashlib
 import html as _html
+import json
 from PySide6.QtWidgets import QMessageBox, QFileDialog
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 
 from gui.workers import ChatWorker, ToolWorker
 from gui.dialogs.diff_dialog import DiffDialog
@@ -25,6 +26,7 @@ from gui.editor import DocumentWidget, ImageViewerWidget
 from core.diff_engine import EditBatch, FileEdit
 from core.diff_parser import DiffParser
 from core.path_resolver import PathResolver
+from core.model_manager import ModelPreferenceStore, ModelSettings
 
 
 def estimate_tokens(text: str) -> int:
@@ -57,10 +59,25 @@ class ChatController:
         self._last_token_usage = None
         self.context_level = "visible"  # Default context level
         self.chat_mode = "edit"  # Default mode: edit or ask
+        self.tools_enabled = True  # Default tools enabled state
         self.worker = None
         self.tool_worker = None
         self.batch_worker = None
         self._last_progress_note = None
+        self._structured_support_cache = {}
+        self._current_model_settings: ModelSettings | None = None
+        self._current_model_supports_structured: bool | None = None
+        self._current_provider: str | None = None
+        self._current_model: str | None = None
+        self.manual_context_files: list[str] = []
+        self._input_debounce_timer = QTimer()
+        self._input_debounce_timer.setSingleShot(True)
+        self._input_debounce_timer.setInterval(350)
+        self._input_debounce_timer.timeout.connect(self.refresh_context_sources_view)
+        
+        # Pagination state for tool searches
+        self._current_search_context = None  # Stores (tool, query, extra_settings)
+        self._current_page = 1
         
         # Initialize diff parser and path resolver
         self._diff_parser = None
@@ -113,16 +130,23 @@ class ChatController:
             return
         self.chat_history.append({"role": "user", "content": message})
         self._last_progress_note = None
+        # Update planned context list as chat content changes
+        try:
+            self.refresh_context_sources_view()
+        except Exception:
+            pass
         
         provider = self.window.get_llm_provider()
         provider_name = self.settings.value("llm_provider", "Ollama")
         if provider_name == "LM Studio":
-            provider_name = "LM Studio (Native SDK)"
+            provider_name = "LM Studio (API)"
             self.settings.setValue("llm_provider", provider_name)
         if provider_name == "Ollama":
             model = self.settings.value("ollama_model", "llama3")
         else:
             model = self.settings.value("lm_studio_model", "llama3")
+
+        self._update_active_model_settings(provider_name, model)
             
         token_usage = estimate_tokens(message)
         token_breakdown = {"User message": token_usage}
@@ -137,22 +161,51 @@ class ChatController:
         except Exception:
             pass
 
-        # Inform the user about model load status when available
+        # Inform the user about model load status and proactively load if needed
         try:
+            loaded_state = None
             if hasattr(provider, "is_model_loaded"):
                 loaded_state = provider.is_model_loaded(model)
-                if loaded_state is True:
-                    note = f"Model '{model}' is already loaded."
-                elif loaded_state is False:
-                    note = f"Model '{model}' is not loaded; LM Studio will load it now."
-                else:
-                    if loaded_models is not None:
-                        roster = ", ".join(loaded_models) if loaded_models else "none"
-                        note = f"Loaded models: {roster}."
+
+            # If we can determine it's not loaded, load it explicitly via ModelManager
+            if loaded_state is False:
+                # Show spinner in chat UI
+                try:
+                    self.window.chat.show_model_loading(model)
+                except Exception:
+                    pass
+                self.window.chat.append_message("System", f"Model '{model}' is not loaded. Loading now…")
+                try:
+                    from core.model_manager import ModelManager, build_default_sources
+                    sources = build_default_sources(self.settings)
+                    mgr = ModelManager(sources)
+                    ok, err = mgr.load_model(provider_name, model)
+                    if ok:
+                        # Allow provider to update internal state (~1s is enough in practice)
+                        import time
+                        time.sleep(1)
+                        self.window.chat.append_message("System", f"Model '{model}' loaded.")
+                        # Refresh model controls to update loaded indicator
+                        try:
+                            self.window.update_model_controls(refresh=True)
+                        except Exception:
+                            pass
                     else:
-                        note = None
-                if note:
-                    self.window.chat.append_message("System", note)
+                        self.window.chat.append_message("System", f"Failed to load model '{model}': {err}")
+                except Exception as exc:
+                    self.window.chat.append_message("System", f"Error while loading model '{model}': {exc}")
+                finally:
+                    try:
+                        self.window.chat.hide_model_loading()
+                    except Exception:
+                        pass
+            elif loaded_state is True:
+                self.window.chat.append_message("System", f"Model '{model}' is already loaded.")
+            else:
+                # Unknown loaded state; show currently loaded roster if available
+                if loaded_models is not None:
+                    roster = ", ".join(loaded_models) if loaded_models else "none"
+                    self.window.chat.append_message("System", f"Loaded models: {roster}.")
         except Exception:
             pass
         
@@ -163,7 +216,7 @@ class ChatController:
         
         if self.context_level != "none" and self.window.rag_engine:
             print(f"DEBUG: Querying RAG for: {message}")
-            context = self.window.rag_engine.query(message, n_results=5, include_metadata=True)
+            context = self.window.rag_engine.query(message, n_results=3, include_metadata=True)
             print(f"DEBUG: Retrieved {len(context)} chunks")
             
             # Extract mentioned file paths (do NOT add full-file tokens; we only count chunk text later)
@@ -219,6 +272,14 @@ class ChatController:
             
         # Add Active File Context based on context level
         active_path, active_content = self.window.editor.get_current_file()
+
+        # Include manual context files selected by user (ahead of active/other open files)
+        system_prompt, token_usage, token_breakdown = self._inject_manual_context(
+            system_prompt,
+            token_usage,
+            token_breakdown,
+            included_files,
+        )
         
         # Include active file if not in "none" mode, not already in RAG context, and not excluded
         if active_path and active_content and self.context_level != "none" and active_path not in included_files:
@@ -235,8 +296,8 @@ class ChatController:
         elif active_path and active_path in included_files:
             print(f"DEBUG: Skipping active file {active_path} (already in RAG context)")
         
-        # Add other open tabs if context level is "all_open" or "full"
-        if self.context_level in ("all_open", "full"):
+        # Add other open tabs if context level is "visible_tabs", "all_open" or "full"
+        if self.context_level in ("visible_tabs", "all_open", "full"):
             open_files = self._collect_open_files(active_path, system_prompt, token_usage, token_breakdown, included_files)
             if open_files:
                 print(f"DEBUG: Including open tabs in context: {', '.join(open_files)}")
@@ -268,18 +329,22 @@ class ChatController:
         
         # Add final reminder for ask mode
         if self.chat_mode == "ask":
-            print("DEBUG: ASK MODE ACTIVE - Disabling tools and edit instructions")
+            print("DEBUG: ASK MODE ACTIVE - Disabling edit instructions")
             system_prompt += (
                 "\n\n" + "="*60 + "\n"
                 "REMINDER: ASK MODE - No file modifications, no patches, no diffs.\n"
                 "Provide helpful information and plain text suggestions only.\n"
                 "="*60
             )
-            # Disable all tools in ask mode
+        
+        # Disable tools if tools checkbox is unchecked
+        if not self.tools_enabled:
+            print("DEBUG: TOOLS DISABLED - Removing tools from enabled list")
             enabled_tools = set()  # Empty set disables all tools
         
         print(f"DEBUG: Enabled tools for this request: {enabled_tools}")
         print(f"DEBUG: Chat mode: {self.chat_mode}")
+        print(f"DEBUG: Tools enabled: {self.tools_enabled}")
         print(f"DEBUG: Token usage total={token_usage} breakdown={token_breakdown}")
              
         self.worker = ChatWorker(
@@ -301,6 +366,9 @@ class ChatController:
         self.worker.response_received.connect(self.on_chat_response)
         self.worker.progress_update.connect(self.on_chat_progress)
         self.worker.start()
+
+        # Keep context file list in sync in UI
+        self._refresh_context_file_view()
 
         # Update dashboard with latest token estimate
         # RAG chunk tokens were already counted above to avoid double counting
@@ -372,7 +440,15 @@ class ChatController:
         
         # Use default instructions
         edit_instructions = (
-            "\n\n## Edit Formats\n"
+            "\n\n## Tools and Directives\n"
+            "\n"
+            "When the user requests searches or image lookups, IMMEDIATELY use the appropriate tool:\n"
+            "- For image searches (Derpibooru, Tantabus, E621): :::TOOL:TOOLNAME:query:::\n"
+            "- For web searches: :::TOOL:SEARCH:query:::\n"
+            "- For image search: :::TOOL:IMAGE:query:::\n"
+            "Stop after outputting the tool command. Do not add explanations before the tool.\n"
+            "\n"
+            "## Edit Formats\n"
             "Use PATCH for line-level edits or range replacements:\n"
             ":::PATCH path/to/file.md\n"
             "L42: old text => new text\n"
@@ -596,13 +672,20 @@ class ChatController:
         
         # Parse and display response (this is very complex logic)
         display_response = self._parse_and_display_response(response)
+
+        display_response, raw_for_json = self._maybe_hide_structured_json(display_response, response)
         
         # If we were streaming, replace the streamed content with parsed version
         # Otherwise, add as a new message
         if self.window.chat.streaming_response:
-            self.window.chat.finish_streaming_response(display_response, raw_text=response)
+            self.window.chat.finish_streaming_response(display_response, raw_text=raw_for_json)
         else:
-            self.window.chat.append_message("Assistant", display_response, raw_text=response)
+            self.window.chat.append_message("Assistant", display_response, raw_text=raw_for_json)
+        # Refresh planned context list when chat updates
+        try:
+            self.refresh_context_sources_view()
+        except Exception:
+            pass
         
     def is_response_complete(self, response: str) -> bool:
         """Check if response appears complete.
@@ -946,6 +1029,311 @@ class ChatController:
         candidate += ']' * max(0, open_square - close_square)
         return candidate
 
+    def _update_active_model_settings(self, provider_name: str, model_name: str) -> None:
+        self._current_provider = provider_name
+        self._current_model = model_name
+        try:
+            prefs = ModelPreferenceStore(self.settings)
+            self._current_model_settings = prefs.get_settings(provider_name, model_name)
+        except Exception:
+            self._current_model_settings = ModelSettings()
+        self._current_model_supports_structured = self._get_structured_support(provider_name, model_name)
+
+    def _get_provider_model_from_settings(self) -> tuple[str, str]:
+        provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "LM Studio":
+            provider_name = "LM Studio (API)"
+        if provider_name == "Ollama":
+            model_name = self.settings.value("ollama_model", "llama3")
+        else:
+            model_name = self.settings.value("lm_studio_model", "llama3")
+        return provider_name, model_name
+
+    def _get_structured_support(self, provider_name: str, model_name: str) -> bool | None:
+        key = (provider_name, model_name)
+        if key in self._structured_support_cache:
+            return self._structured_support_cache[key]
+
+        support: bool | None = None
+        try:
+            from core.model_manager import ModelManager, build_default_sources
+
+            mgr = ModelManager(build_default_sources(self.settings))
+            infos = mgr.list_models(refresh=False)
+            for info in infos:
+                self._structured_support_cache[(info.provider, info.name)] = info.supports_structured_output
+            support = self._structured_support_cache.get(key)
+        except Exception as exc:
+            print(f"DEBUG: structured support lookup failed: {exc}")
+
+        if support is None:
+            try:
+                provider = self.window.get_llm_provider()
+                support = bool(getattr(provider, "supports_structured_output", False))
+            except Exception:
+                support = False
+
+        self._structured_support_cache[key] = support
+        return support
+
+    def _should_hide_structured_json(self) -> bool:
+        structured_enabled = bool(self.settings.value("structured_enabled", False, type=bool))
+        if not structured_enabled:
+            return False
+
+        if not self._current_provider or not self._current_model:
+            provider_name, model_name = self._get_provider_model_from_settings()
+            self._update_active_model_settings(provider_name, model_name)
+
+        supports_structured = self._current_model_supports_structured
+        if supports_structured is False:
+            return False
+
+        hide_pref = True
+        if self._current_model_settings:
+            hide_pref = bool(getattr(self._current_model_settings, "hide_structured_output_json", True))
+        return hide_pref
+
+    def _maybe_hide_structured_json(self, display_text: str, raw_text: str) -> tuple[str, str]:
+        if not self._should_hide_structured_json():
+            return display_text, raw_text
+
+        candidate = raw_text or display_text
+        parsed = None
+        if isinstance(candidate, str):
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                repaired = self._repair_json_string(candidate)
+                if repaired:
+                    try:
+                        parsed = json.loads(repaired)
+                    except Exception:
+                        parsed = None
+        if parsed is None:
+            return display_text, raw_text
+
+        preview = self._render_json_preview(parsed)
+        pretty_block = self._format_json_block(parsed)
+        note = "_JSON hidden. Use Show JSON to view raw structured output._"
+        parts = [preview, pretty_block, note]
+        return "\n\n".join([p for p in parts if p]), raw_text or display_text
+
+    def _render_json_preview(self, payload, depth: int = 0) -> str:
+        prefix = "  " * depth
+        if isinstance(payload, dict):
+            if not payload:
+                return f"{prefix}- (empty object)"
+            lines = []
+            for key, value in payload.items():
+                if isinstance(value, (dict, list)):
+                    nested = self._render_json_preview(value, depth + 1)
+                    nested_block = "\n".join(f"{'  ' * (depth + 1)}{line}" for line in nested.splitlines())
+                    lines.append(f"{prefix}- **{key}**:\n{nested_block}")
+                else:
+                    lines.append(f"{prefix}- **{key}**: {self._stringify_json_value(value)}")
+            return "\n".join(lines)
+        if isinstance(payload, list):
+            if not payload:
+                return f"{prefix}- (empty array)"
+            lines = []
+            for idx, value in enumerate(payload):
+                if isinstance(value, (dict, list)):
+                    nested = self._render_json_preview(value, depth + 1)
+                    nested_block = "\n".join(f"{'  ' * (depth + 1)}{line}" for line in nested.splitlines())
+                    lines.append(f"{prefix}- [{idx}]:\n{nested_block}")
+                else:
+                    lines.append(f"{prefix}- [{idx}]: {self._stringify_json_value(value)}")
+            return "\n".join(lines)
+        return f"{prefix}{self._stringify_json_value(payload)}"
+
+    @staticmethod
+    def _stringify_json_value(value) -> str:
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    @staticmethod
+    def _format_json_block(payload) -> str:
+        try:
+            rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+            return f"```json\n{rendered}\n```"
+        except Exception:
+            return ""
+
+    # ===== Manual context management =====
+
+    def add_context_file(self, path: str):
+        if not path:
+            return
+        if path in self.manual_context_files:
+            self._refresh_context_file_view()
+            return
+        self.manual_context_files.append(path)
+        self._refresh_context_file_view()
+        # Switch UI to Custom when manual context changes
+        try:
+            self.window.chat._set_context_combo_custom()
+        except Exception:
+            pass
+
+    def remove_context_file(self, path: str):
+        if not path:
+            return
+        try:
+            self.manual_context_files.remove(path)
+        except ValueError:
+            return
+        self._refresh_context_file_view()
+        # Switch UI to Custom when manual context changes
+        try:
+            self.window.chat._set_context_combo_custom()
+        except Exception:
+            pass
+
+    def _refresh_context_file_view(self):
+        """Refresh the Context Files list to show current planned sources.
+        Aggregates manual context, active file, open tabs per context level,
+        and mentions in input among open tabs for 'visible' level.
+        """
+        try:
+            self.refresh_context_sources_view()
+        except Exception:
+            pass
+
+    def on_chat_input_changed(self):
+        """Update context files when the user is typing in chat."""
+        try:
+            # Show spinner and debounce the refresh
+            self.window.chat.show_context_spinner()
+        except Exception:
+            pass
+        try:
+            if self._input_debounce_timer.isActive():
+                self._input_debounce_timer.stop()
+            self._input_debounce_timer.start()
+        except Exception:
+            pass
+
+    def refresh_context_sources_view(self):
+        """Compute and update the context files UI with planned sources."""
+        root = self.window.project_manager.get_root_path()
+        files: list[str] = []
+        seen: set[str] = set()
+
+        def add_path(p: str):
+            if not p:
+                return
+            if p not in seen:
+                files.append(p)
+                seen.add(p)
+
+        # Manual pinned files first
+        for p in list(self.manual_context_files):
+            add_path(p)
+
+        # If context is none, only manual files are shown
+        if self.context_level == "none":
+            self.window.chat.update_context_files(files, root)
+            return
+
+        # Active file
+        try:
+            active_path, _ = self.window.editor.get_current_file()
+        except Exception:
+            active_path = None
+        if active_path:
+            add_path(active_path)
+
+        # All open tabs for 'visible_tabs', 'all_open' and 'full'
+        if self.context_level in ("visible_tabs", "all_open", "full"):
+            try:
+                for p in list(self.window.editor.open_files.keys()):
+                    add_path(p)
+            except Exception:
+                pass
+        elif self.context_level == "visible":
+            # Include mentioned files among open tabs based on current input text
+            try:
+                text = self.window.chat.input_field.toPlainText()
+            except Exception:
+                text = ""
+            text_lower = text.lower()
+            try:
+                for p in list(self.window.editor.open_files.keys()):
+                    base = os.path.basename(p).lower()
+                    name_no_ext = os.path.splitext(base)[0]
+                    if base in text_lower or (len(name_no_ext) > 3 and name_no_ext in text_lower):
+                        add_path(p)
+            except Exception:
+                pass
+
+        # RAG-derived sources based on current input (for all non-none levels)
+        if self.context_level != "none" and getattr(self.window, 'rag_engine', None):
+            try:
+                # Use a small number of results to keep UI responsive
+                text = self.window.chat.input_field.toPlainText()
+                context = self.window.rag_engine.query(text or "", n_results=3, include_metadata=True)
+                for chunk in context or []:
+                    meta = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                    source = meta.get("source")
+                    if source:
+                        # Skip excluded files
+                        try:
+                            if self.window.rag_engine._should_exclude_file(source):
+                                continue
+                        except Exception:
+                            pass
+                        add_path(source)
+            except Exception as e:
+                # Non-fatal; ignore RAG errors for live view
+                print(f"DEBUG: Live RAG context sources update failed: {e}")
+
+        # Update the UI list with aggregated planned sources
+        self.window.chat.update_context_files(files, root)
+
+    def _inject_manual_context(
+        self,
+        system_prompt: str,
+        token_usage: int,
+        token_breakdown: dict,
+        included_files: set,
+    ) -> tuple[str, int, dict]:
+        if not self.manual_context_files:
+            return system_prompt, token_usage, token_breakdown
+
+        root = self.window.project_manager.get_root_path()
+        rag = self.window.rag_engine
+
+        for path in list(self.manual_context_files):
+            try:
+                if root and os.path.commonpath([path, root]) != root:
+                    continue
+            except Exception:
+                continue
+
+            if path in included_files:
+                continue
+
+            if rag and rag._should_exclude_file(path):
+                continue
+
+            content = self.window.project_manager.read_file(path)
+            if not content:
+                continue
+
+            tokens = estimate_tokens(content)
+            system_prompt += f"\nPinned Context ({path}):\n{content}\n"
+            token_usage += tokens
+            token_breakdown[f"Manual: {path}"] = tokens
+            included_files.add(path)
+
+        return system_prompt, token_usage, token_breakdown
+
     def _render_structured_payload(self, payload: dict, schema_id: str) -> str:
         """Render a structured payload to a human-readable text, and enqueue diffs.
         For diff-like schemas, create pending edit links using existing flow.
@@ -1069,10 +1457,46 @@ class ChatController:
     def _continue_response(self):
         """Automatically continue the previous response."""
         provider = self.window.get_llm_provider()
-        model = self.settings.value("ollama_model", "llama3")
+        provider_name = self.settings.value("llm_provider", "Ollama")
+        if provider_name == "LM Studio":
+            provider_name = "LM Studio (Native SDK)"
+            self.settings.setValue("llm_provider", provider_name)
+        model = self.settings.value("ollama_model", "llama3") if provider_name == "Ollama" else self.settings.value("lm_studio_model", "llama3")
         system_prompt = self.window.project_manager.get_system_prompt(
             self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant.")
         )
+
+        # Ensure model is loaded with user-facing messages
+        try:
+            loaded_state = provider.is_model_loaded(model) if hasattr(provider, "is_model_loaded") else None
+            if loaded_state is False:
+                # Show spinner in chat UI
+                try:
+                    self.window.chat.show_model_loading(model)
+                except Exception:
+                    pass
+                self.window.chat.append_message("System", f"Model '{model}' is not loaded. Loading now…")
+                from core.model_manager import ModelManager, build_default_sources
+                mgr = ModelManager(build_default_sources(self.settings))
+                ok, err = mgr.load_model(provider_name, model)
+                if ok:
+                    import time
+                    time.sleep(1)
+                    self.window.chat.append_message("System", f"Model '{model}' loaded.")
+                    try:
+                        self.window.update_model_controls(refresh=True)
+                    except Exception:
+                        pass
+                else:
+                    self.window.chat.append_message("System", f"Failed to load model '{model}': {err}")
+                try:
+                    self.window.chat.hide_model_loading()
+                except Exception:
+                    pass
+            elif loaded_state is True:
+                self.window.chat.append_message("System", f"Model '{model}' is already loaded.")
+        except Exception:
+            pass
 
         self.worker = ChatWorker(
             provider,
@@ -1190,12 +1614,48 @@ class ChatController:
             model = self.settings.value("ollama_model", "llama3")
         else:
             model = self.settings.value("lm_studio_model", "llama3")
+
+        # Ensure model is loaded with user-facing messages
+        try:
+            loaded_state = provider.is_model_loaded(model) if hasattr(provider, "is_model_loaded") else None
+            if loaded_state is False:
+                # Show spinner in chat UI
+                try:
+                    self.window.chat.show_model_loading(model)
+                except Exception:
+                    pass
+                self.window.chat.append_message("System", f"Model '{model}' is not loaded. Loading now…")
+                from core.model_manager import ModelManager, build_default_sources
+                # Map deprecated name if needed
+                if provider_name == "LM Studio":
+                    provider_name = "LM Studio (Native SDK)"
+                    self.settings.setValue("llm_provider", provider_name)
+                mgr = ModelManager(build_default_sources(self.settings))
+                ok, err = mgr.load_model(provider_name, model)
+                if ok:
+                    import time
+                    time.sleep(1)
+                    self.window.chat.append_message("System", f"Model '{model}' loaded.")
+                    try:
+                        self.window.update_model_controls(refresh=True)
+                    except Exception:
+                        pass
+                else:
+                    self.window.chat.append_message("System", f"Failed to load model '{model}': {err}")
+                try:
+                    self.window.chat.hide_model_loading()
+                except Exception:
+                    pass
+            elif loaded_state is True:
+                self.window.chat.append_message("System", f"Model '{model}' is already loaded.")
+        except Exception:
+            pass
         
         # Get RAG context if available
         context = []
         if self.window.rag_engine and last_user_idx is not None:
             query = self.chat_history[last_user_idx]['content']
-            context = self.window.rag_engine.query(query, n_results=5)
+            context = self.window.rag_engine.query(query, n_results=3)
         
         # Build system prompt
         system_prompt = self.window.project_manager.get_system_prompt(
@@ -1314,6 +1774,26 @@ class ChatController:
         """
         self.context_level = level
         print(f"DEBUG: Context level changed to: {level}")
+        try:
+            self.window.chat.show_context_spinner()
+        except Exception:
+            pass
+        # Refresh planned context list on change
+        try:
+            self.refresh_context_sources_view()
+        except Exception:
+            pass
+
+    def on_tabs_changed(self, *args):
+        """Handle editor tab open/close or switch events: show spinner and refresh."""
+        try:
+            self.window.chat.show_context_spinner()
+        except Exception:
+            pass
+        try:
+            self.refresh_context_sources_view()
+        except Exception:
+            pass
     
     def on_mode_changed(self, mode):
         """Handle chat mode change.
@@ -1324,6 +1804,15 @@ class ChatController:
         self.chat_mode = mode
         print(f"DEBUG: Chat mode changed to: {mode}")
 
+    def on_tools_enabled_changed(self, enabled: bool):
+        """Handle tools enabled/disabled change.
+        
+        Args:
+            enabled: Whether tools are enabled
+        """
+        self.tools_enabled = enabled
+        print(f"DEBUG: Tools enabled changed to: {enabled}")
+
     def on_tool_finished(self, result_text, extra_data):
         """Handle tool execution completion.
         
@@ -1333,24 +1822,30 @@ class ChatController:
         """
         self.window.chat.remove_thinking()
         
+        print(f"DEBUG: on_tool_finished called: result_text={result_text[:100]}, extra_data type={type(extra_data)}, extra_data={extra_data}")
+        
         # Check if this is an image search result with image data
         if extra_data and isinstance(extra_data, list) and len(extra_data) > 0:
+            print(f"DEBUG: extra_data is list with {len(extra_data)} items")
+            print(f"DEBUG: first item keys: {extra_data[0].keys() if isinstance(extra_data[0], dict) else 'not a dict'}")
             # Check if it looks like image results (has 'image' or 'thumbnail' keys)
             if isinstance(extra_data[0], dict) and ('image' in extra_data[0] or 'thumbnail' in extra_data[0]):
+                print(f"DEBUG: Creating ImageSelectionDialog with {len(extra_data)} images")
                 # Show image selection dialog
                 from gui.dialogs.image_dialog import ImageSelectionDialog
                 if self.window.project_manager.root_path:
                     dialog = ImageSelectionDialog(extra_data, self.window.project_manager.root_path, self.window)
+                    print(f"DEBUG: Dialog created, executing...")
                     if dialog.exec():
                         saved_paths = dialog.saved_paths
                         if saved_paths:
-                            result_text += f"\n\nSaved {len(saved_paths)} images:\n" + "\n".join(saved_paths)
+                            result_text = f"Successfully found and saved {len(saved_paths)} images from the search. Images were presented to the user and selected. Paths: {', '.join(saved_paths)}"
                         else:
-                            result_text += "\n\nNo images were saved."
+                            result_text = "Search found images but user chose not to save any."
                     else:
-                        result_text += "\n\nImage selection cancelled."
+                        result_text = "User cancelled the image selection dialog."
                 else:
-                    result_text += "\n\nError: No project open to save images."
+                    result_text = "Error: No project open to save images."
         
         # Continue chat with result
         self.continue_chat_with_tool_result(result_text)
@@ -1991,4 +2486,142 @@ class ChatController:
         if original.endswith("\n") and not new_content.endswith("\n"):
             new_content += "\n"
             
-        return True, new_content
+        return True, new_content    
+    def execute_tool_from_menu(self, tool, query: str, extra_settings=None):
+        """Execute a tool from the Tools menu with query and optional settings.
+        
+        Args:
+            tool: The Tool instance to execute
+            query: The search query string
+            extra_settings: Optional dict with extra settings (e.g., {"sort": "score"})
+        """
+        try:
+            # Store search context for pagination
+            self._current_search_context = (tool, query, extra_settings or {})
+            self._current_page = 1
+            
+            # Get enabled tools from project settings
+            enabled_tools = self.window.project_manager.get_enabled_tools()
+            
+            # Log that tool is being executed
+            self.window.chat.append_message("System", f"Executing {tool.name} tool...")
+            
+            # Create and start tool worker
+            # Note: ToolWorker expects tool_name (str), query, enabled_tools, project_manager
+            self.tool_worker = ToolWorker(
+                tool_name=tool.name,
+                query=query,
+                enabled_tools=enabled_tools,
+                project_manager=self.window.project_manager
+            )
+            
+            # Store extra settings for later use (if needed)
+            self.tool_worker.extra_settings = extra_settings or {}
+            
+            # Connect signals
+            self.tool_worker.finished.connect(self._on_tool_from_menu_finished)
+            
+            # Show thinking indicator
+            self.window.chat.show_thinking()
+            
+            # Start worker
+            self.tool_worker.start()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self.window,
+                "Tool Execution Error",
+                f"Error executing {tool.name}: {str(e)}"
+            )
+            print(f"Error in execute_tool_from_menu: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _navigate_search_page(self, direction: int):
+        """Navigate to next or previous page of search results.
+        
+        Args:
+            direction: 1 for next page, -1 for previous page
+        """
+        if not self._current_search_context:
+            QMessageBox.warning(self.window, "No Search", "No active search to navigate.")
+            return
+        
+        self._current_page += direction
+        if self._current_page < 1:
+            self._current_page = 1
+            QMessageBox.information(self.window, "First Page", "Already on the first page.")
+            return
+        
+        tool, query, extra_settings = self._current_search_context
+        
+        try:
+            # Get enabled tools from project settings
+            enabled_tools = self.window.project_manager.get_enabled_tools()
+            
+            # Add page parameter to extra settings
+            settings_with_page = (extra_settings or {}).copy()
+            settings_with_page["page"] = self._current_page
+            
+            # Log the navigation
+            page_word = "next" if direction > 0 else "previous"
+            self.window.chat.append_message("System", f"Loading {page_word} page (page {self._current_page})...")
+            
+            # Create and start tool worker with page parameter
+            self.tool_worker = ToolWorker(
+                tool_name=tool.name,
+                query=query,
+                enabled_tools=enabled_tools,
+                project_manager=self.window.project_manager
+            )
+            
+            # Store settings including page
+            self.tool_worker.extra_settings = settings_with_page
+            
+            # Connect signals
+            self.tool_worker.finished.connect(self._on_tool_from_menu_finished)
+            
+            # Show thinking indicator
+            self.window.chat.show_thinking()
+            
+            # Start worker
+            self.tool_worker.start()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self.window,
+                "Navigation Error",
+                f"Error loading next page: {str(e)}"
+            )
+            # Reset page on error
+            self._current_page -= direction
+    
+    def _on_tool_from_menu_finished(self, result_text, extra_data):
+        """Handle tool completion from menu execution."""
+        self.window.chat.remove_thinking()
+        
+        # Show result message with page info if navigating
+        if self._current_page > 1:
+            result_text = f"{result_text} (Page {self._current_page})"
+        self.window.chat.append_message("System", result_text)
+        
+        # If there are images, show image selection dialog with pagination
+        if extra_data:
+            from gui.dialogs.image_dialog import ImageSelectionDialog
+            dialog = ImageSelectionDialog(
+                extra_data, 
+                self.window.project_manager.root_path, 
+                self.window,
+                on_next_page=lambda: self._navigate_search_page(1),
+                on_prev_page=lambda: self._navigate_search_page(-1),
+                current_page=self._current_page,
+                has_search_context=self._current_search_context is not None
+            )
+            if dialog.exec():
+                saved_paths = dialog.get_saved_paths()
+                if saved_paths:
+                    for p in saved_paths:
+                        name = os.path.basename(p)
+                        self.window.chat.append_message("System", f"Image saved to: {name}")
+
+    

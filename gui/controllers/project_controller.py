@@ -181,6 +181,13 @@ class ProjectController:
         image_studio_open = self.settings.value(f"state/{key}/image_studio_open", False, type=bool)
         if image_studio_open:
             self.window.open_image_studio()
+
+        # After restoring tabs, populate Context Files list
+        try:
+            self.window.chat.show_context_spinner()
+            self.window.chat_controller.refresh_context_sources_view()
+        except Exception:
+            pass
     
     def _open_assets_folder(self):
         """Open the configured assets folder in sidebar if it exists."""

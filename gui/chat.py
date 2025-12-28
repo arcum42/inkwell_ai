@@ -4,7 +4,22 @@ import markdown
 from PySide6 import QtGui
 from PySide6.QtCore import Signal, Qt, QSize, QRect, QPoint
 from PySide6.QtGui import QClipboard, QKeySequence, QFont, QShortcut
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QPlainTextEdit, QPushButton, QHBoxLayout, QLabel, QLayout, QComboBox
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QTextBrowser,
+    QPlainTextEdit,
+    QPushButton,
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QComboBox,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
+    QProgressBar,
+    QCheckBox,
+)
 from PySide6.QtCore import QSettings
 
 
@@ -110,9 +125,12 @@ class ChatWidget(QWidget):
     refresh_models_requested = Signal()  # Request to refresh available models
     context_level_changed = Signal(str)  # Emits context level: "None", "Visible", "All", "Full"
     mode_changed = Signal(str)  # Emits mode: "ask" or "edit"
+    tools_enabled_changed = Signal(bool)  # Emits True/False when tools checkbox changes
     schema_changed = Signal(str)  # Emits schema id or "None"
     message_copied = Signal(str)  # Emits "message" or "chat" when copied
     persona_changed = Signal(str)  # Emits persona name when changed
+    context_file_add_requested = Signal()
+    context_file_remove_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -151,6 +169,16 @@ class ChatWidget(QWidget):
         refresh_btn.setToolTip("Refresh available models")
         refresh_btn.clicked.connect(self.on_refresh_models)
         controls_layout.addWidget(refresh_btn)
+
+        # Model loading indicator (spinner-like chip)
+        self.model_load_indicator = QLabel()
+        self.model_load_indicator.setVisible(False)
+        self.model_load_indicator.setStyleSheet(
+            "font-size: 9pt; color: #fff; background: #2196F3; "
+            "padding: 2px 8px; border-radius: 12px; font-weight: bold;"
+        )
+        self.model_load_indicator.setText("⏳ Loading model…")
+        controls_layout.addWidget(self.model_load_indicator)
         
         self.layout.addLayout(controls_layout)
         
@@ -158,16 +186,83 @@ class ChatWidget(QWidget):
         persona_layout = QHBoxLayout()
         persona_layout.setContentsMargins(0, 0, 0, 5)
         persona_layout.setSpacing(8)
-        
+
         persona_label = QLabel("Persona:")
         persona_label.setStyleSheet("font-size: 9pt;")
         persona_layout.addWidget(persona_label)
-        
+
         self.persona_combo = QComboBox()
         self.persona_combo.currentIndexChanged.connect(self.on_persona_changed)
         persona_layout.addWidget(self.persona_combo, 1)
-        
+
         self.layout.addLayout(persona_layout)
+
+        # Context Level Selector (move above context files)
+        context_layout = QHBoxLayout()
+        context_layout.setContentsMargins(0, 0, 0, 5)
+        context_layout.setSpacing(5)
+
+        context_label = QLabel("Context:")
+        context_label.setStyleSheet("font-size: 9pt;")
+        context_layout.addWidget(context_label)
+
+        self.context_combo = QComboBox()
+        self.context_combo.addItems([
+            "None",
+            "Visible Tabs",
+            "Visible Tab + Mentioned",
+            "All Open Tabs",
+            "Full",
+            "Custom",
+        ])
+        self.context_combo.setCurrentIndex(2)  # Default to "Visible Tab + Mentioned"
+        self.context_combo.currentIndexChanged.connect(self.on_context_level_changed)
+        context_layout.addWidget(self.context_combo, 1)
+
+        self.layout.addLayout(context_layout)
+
+        # Context Files (planned + manual)
+        context_files_layout = QVBoxLayout()
+        context_files_layout.setContentsMargins(0, 0, 0, 5)
+        context_files_layout.setSpacing(4)
+
+        cf_header = QHBoxLayout()
+        cf_header.setContentsMargins(0, 0, 0, 0)
+        cf_header.setSpacing(6)
+        cf_label = QLabel("Context Files:")
+        cf_label.setStyleSheet("font-size: 9pt;")
+        cf_header.addWidget(cf_label)
+
+        # Live update spinner for context sources (indeterminate progress)
+        self.context_update_spinner = QProgressBar()
+        self.context_update_spinner.setVisible(False)
+        self.context_update_spinner.setRange(0, 0)  # Indeterminate
+        self.context_update_spinner.setMaximumWidth(120)
+        self.context_update_spinner.setTextVisible(False)
+        self.context_update_spinner.setStyleSheet(
+            "QProgressBar { border: 1px solid #ddd; border-radius: 6px; background: #f5f5f5; height: 10px; }"
+            "QProgressBar::chunk { background-color: #9E9E9E; border-radius: 6px; }"
+        )
+        cf_header.addWidget(self.context_update_spinner)
+        cf_header.addStretch()
+        add_cf_btn = QPushButton("+")
+        add_cf_btn.setMaximumWidth(28)
+        add_cf_btn.setToolTip("Add file to chat context")
+        add_cf_btn.clicked.connect(self.on_add_context_file)
+        cf_header.addWidget(add_cf_btn)
+        rem_cf_btn = QPushButton("-")
+        rem_cf_btn.setMaximumWidth(28)
+        rem_cf_btn.setToolTip("Remove selected context file")
+        rem_cf_btn.clicked.connect(self.on_remove_context_file)
+        cf_header.addWidget(rem_cf_btn)
+        context_files_layout.addLayout(cf_header)
+
+        self.context_files_list = QListWidget()
+        self.context_files_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.context_files_list.setStyleSheet("font-size: 9pt;")
+        context_files_layout.addWidget(self.context_files_list)
+
+        self.layout.addLayout(context_files_layout)
         
         # Chat History
         self.history = ChatBrowser()
@@ -236,28 +331,6 @@ class ChatWidget(QWidget):
         button_layout.addWidget(copy_to_clipboard_btn)
         
         self.layout.addLayout(button_layout)
-        
-        # Context Level Selector
-        context_layout = QHBoxLayout()
-        context_layout.setContentsMargins(0, 0, 0, 5)
-        context_layout.setSpacing(5)
-        
-        context_label = QLabel("Context:")
-        context_label.setStyleSheet("font-size: 9pt;")
-        context_layout.addWidget(context_label)
-        
-        self.context_combo = QComboBox()
-        self.context_combo.addItems([
-            "None",
-            "Visible Tab + Mentioned",
-            "All Open Tabs",
-            "Full"
-        ])
-        self.context_combo.setCurrentIndex(1)  # Default to "Visible Tab + Mentioned"
-        self.context_combo.currentIndexChanged.connect(self.on_context_level_changed)
-        context_layout.addWidget(self.context_combo, 1)
-        
-        self.layout.addLayout(context_layout)
 
         # Schema Selector (advanced)
         schema_layout = QHBoxLayout()
@@ -281,7 +354,7 @@ class ChatWidget(QWidget):
 
         self.layout.addLayout(schema_layout)
         
-        # Mode Selector
+        # Mode Selector and Tools Checkbox
         mode_layout = QHBoxLayout()
         mode_layout.setContentsMargins(0, 0, 0, 5)
         mode_layout.setSpacing(5)
@@ -295,6 +368,14 @@ class ChatWidget(QWidget):
         self.mode_combo.setCurrentIndex(1)  # Default to Edit
         self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
         mode_layout.addWidget(self.mode_combo, 1)
+        
+        # Add Tools checkbox
+        self.tools_checkbox = QCheckBox("Tools")
+        self.tools_checkbox.setChecked(True)  # Default to enabled
+        self.tools_checkbox.setToolTip("Enable/disable LLM tools (search, images, etc.)")
+        self.tools_checkbox.setStyleSheet("font-size: 9pt;")
+        self.tools_checkbox.stateChanged.connect(self.on_tools_enabled_changed)
+        mode_layout.addWidget(self.tools_checkbox)
         
         self.layout.addLayout(mode_layout)
         
@@ -430,6 +511,32 @@ class ChatWidget(QWidget):
             actual_model = self.model_combo.currentData()
             if actual_model:
                 self.model_changed.emit(actual_model)
+
+    def on_add_context_file(self):
+        self.context_file_add_requested.emit()
+
+    def on_remove_context_file(self):
+        item = self.context_files_list.currentItem()
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if path:
+            self.context_file_remove_requested.emit(path)
+
+    def show_model_loading(self, model_name: str):
+        """Show a small loading indicator near the model dropdown."""
+        try:
+            self.model_load_indicator.setText(f"⏳ Loading {model_name}…")
+            self.model_load_indicator.setVisible(True)
+        except Exception:
+            pass
+
+    def hide_model_loading(self):
+        """Hide the model loading indicator."""
+        try:
+            self.model_load_indicator.setVisible(False)
+        except Exception:
+            pass
     
     def on_refresh_models(self):
         """Emit signal to refresh available models."""
@@ -467,6 +574,23 @@ class ChatWidget(QWidget):
             self.persona_combo.setEnabled(True)
         
         self.persona_combo.blockSignals(False)
+
+    def update_context_files(self, files, project_root: str | None = None):
+        """Refresh the manual context files list."""
+        self.context_files_list.clear()
+        for path in files or []:
+            display = path
+            if project_root and path.startswith(project_root):
+                rel = path[len(project_root):].lstrip("/\\")
+                display = rel or path
+            item = QListWidgetItem(display)
+            item.setData(Qt.UserRole, path)
+            self.context_files_list.addItem(item)
+        # Hide update spinner when list refresh completes
+        try:
+            self.hide_context_spinner()
+        except Exception:
+            pass
     
     def on_context_level_changed(self, index):
         """Emit signal when context level changes."""
@@ -474,19 +598,45 @@ class ChatWidget(QWidget):
         # Convert to internal format
         if level == "None":
             level = "none"
+        elif level == "Visible Tabs":
+            level = "visible_tabs"
         elif level == "Visible Tab + Mentioned":
             level = "visible"
         elif level == "All Open Tabs":
             level = "all_open"
         elif level == "Full":
             level = "full"
+        elif level == "Custom":
+            level = "custom"
         self.context_level_changed.emit(level)
+
+    def _set_context_combo_custom(self):
+        idx = self.context_combo.findText("Custom")
+        if idx != -1 and self.context_combo.currentIndex() != idx:
+            self.context_combo.setCurrentIndex(idx)
+
+    def show_context_spinner(self):
+        try:
+            self.context_update_spinner.setVisible(True)
+        except Exception:
+            pass
+
+    def hide_context_spinner(self):
+        try:
+            self.context_update_spinner.setVisible(False)
+        except Exception:
+            pass
     
     def on_mode_changed(self, index):
         """Emit signal when mode changes."""
         mode = self.mode_combo.itemText(index).lower()
         self.current_mode = mode
         self.mode_changed.emit(mode)
+
+    def on_tools_enabled_changed(self, state):
+        """Emit signal when tools checkbox changes."""
+        enabled = state == Qt.CheckState.Checked.value
+        self.tools_enabled_changed.emit(enabled)
 
     def on_schema_changed(self, index):
         """Persist schema selection and emit signal."""

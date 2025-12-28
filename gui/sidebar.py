@@ -412,23 +412,43 @@ class ProjectSection(QWidget):
             return
         old_path = self.model.filePath(index)
         root_path = self.model.rootPath()
-        # Choose destination folder within project
+        
+        # Allow selecting from any active project section (Project or Assets)
+        # Start browsing from the current section's root
         dest_folder = QFileDialog.getExistingDirectory(
             self,
-            "Select destination folder",
+            "Select destination folder (within Project or Assets)",
             root_path,
             QFileDialog.ShowDirsOnly
         )
         if not dest_folder:
             return
-        # Ensure destination is inside project
-        try:
-            if os.path.commonpath([dest_folder, root_path]) != root_path:
-                QMessageBox.warning(self, "Invalid Folder", "Please choose a folder within the project.")
-                return
-        except ValueError:
-            QMessageBox.warning(self, "Invalid Folder", "Please choose a valid folder within the project.")
+        
+        # Validate destination is within one of the active project sections
+        valid_roots = []
+        if self.parent_sidebar:
+            for section_name, section in self.parent_sidebar.project_sections.items():
+                if hasattr(section, 'root_path'):
+                    valid_roots.append(section.root_path)
+        
+        # If we don't have parent_sidebar, fallback to current root only
+        if not valid_roots:
+            valid_roots = [root_path]
+        
+        # Check if destination is within any valid root
+        dest_valid = False
+        for valid_root in valid_roots:
+            try:
+                if os.path.commonpath([dest_folder, valid_root]) == valid_root:
+                    dest_valid = True
+                    break
+            except ValueError:
+                continue
+        
+        if not dest_valid:
+            QMessageBox.warning(self, "Invalid Folder", "Please choose a folder within Project or Assets.")
             return
+        
         # Build new path
         new_path = os.path.join(dest_folder, os.path.basename(old_path))
         if os.path.exists(new_path):

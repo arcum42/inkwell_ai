@@ -20,6 +20,7 @@ class MenuBarManager:
         """Create all application menus."""
         self._create_file_menu()
         self._create_edit_menu()
+        self._create_tools_menu()
         self._create_settings_menu()
         self._create_debug_menu()
         self._create_view_menu()
@@ -83,12 +84,43 @@ class MenuBarManager:
         find_action.triggered.connect(lambda: self.window.editor.show_search())
         edit_menu.addAction(find_action)
         
+    def _create_tools_menu(self):
+        """Create Tools menu with dialog-enabled tools."""
+        from core.tools.registry import get_registry
+        
+        tools_menu = self.menu_bar.addMenu("Tools")
+        self.tools_menu = tools_menu  # Store reference for later updates
+        
+        # Get all tools and filter for those with dialogs
+        registry = get_registry()
+        dialog_tools = []
+        
+        for tool in registry.get_all_tools():
+            if tool and hasattr(tool, 'has_dialog') and tool.has_dialog():
+                dialog_tools.append((tool.name, tool))
+        
+        # If no dialog tools, show a placeholder
+        if not dialog_tools:
+            placeholder = QAction("(No tools available)", self.window)
+            placeholder.setEnabled(False)
+            tools_menu.addAction(placeholder)
+        else:
+            # Add actions for each dialog-enabled tool
+            for tool_name, tool in sorted(dialog_tools):
+                action = QAction(tool_name, self.window)
+                action.triggered.connect(lambda checked=False, t=tool: self.window.on_tool_dialog_triggered(t))
+                tools_menu.addAction(action)
+        
     def _create_settings_menu(self):
         """Create Settings menu."""
         settings_menu = self.menu_bar.addMenu("Settings")
         settings_action = QAction("Preferences...", self.window)
         settings_action.triggered.connect(self.window.open_settings_dialog)
         settings_menu.addAction(settings_action)
+
+        model_mgr_action = QAction("Model Manager...", self.window)
+        model_mgr_action.triggered.connect(self.window.open_model_manager)
+        settings_menu.addAction(model_mgr_action)
         
         settings_menu.addSeparator()
         

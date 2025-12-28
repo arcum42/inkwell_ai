@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QFileDialog,
+    QScrollArea,
 )
 from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFont
@@ -77,8 +78,8 @@ class SettingsDialog(QDialog):
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(["Ollama", "LM Studio (Native SDK)"])
         current_provider = self.settings.value("llm_provider", "Ollama")
-        # Map deprecated "LM Studio" to native SDK
-        if current_provider == "LM Studio":
+        # Map deprecated "LM Studio" to Native SDK provider name
+        if current_provider in ("LM Studio", "LM Studio (API)"):
             current_provider = "LM Studio (Native SDK)"
             self.settings.setValue("llm_provider", current_provider)
         self.provider_combo.setCurrentText(current_provider)
@@ -91,17 +92,11 @@ class SettingsDialog(QDialog):
         self.ollama_row = form_layout.rowCount()
         form_layout.addRow("Ollama URL:", self.ollama_url)
         
-        # LM Studio URL (deprecated OpenAI-compatible)
-        self.lm_studio_url = QLineEdit()
-        self.lm_studio_url.setText(self.settings.value("lm_studio_url", "http://localhost:1234"))
-        self.lm_studio_row = form_layout.rowCount()
-        form_layout.addRow("LM Studio URL (deprecated):", self.lm_studio_url)
-        
         # LM Studio Native SDK URL
         self.lm_studio_native_url = QLineEdit()
         self.lm_studio_native_url.setText(self.settings.value("lm_studio_native_url", "localhost:1234"))
         self.lm_native_row = form_layout.rowCount()
-        form_layout.addRow("LM Studio Native URL:", self.lm_studio_native_url)
+        form_layout.addRow("LM Studio URL:", self.lm_studio_native_url)
         
         # ComfyUI URL
         self.comfy_url = QLineEdit()
@@ -226,6 +221,15 @@ class SettingsDialog(QDialog):
             layout.addWidget(label)
             return tab
         
+        print(f"DEBUG: Creating tools tab with project root: {self.proj.get_root_path()}")
+        
+        # Create a scrollable area for tools and imageboard settings
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        
         tools_group = QGroupBox("Project Tools")
         tools_layout = QVBoxLayout()
         enabled_set = self.proj.get_enabled_tools()
@@ -290,8 +294,109 @@ class SettingsDialog(QDialog):
                 tools_layout.addWidget(tool_settings_widget)
         
         tools_group.setLayout(tools_layout)
-        layout.addWidget(tools_group)
-        layout.addStretch()
+        scroll_layout.addWidget(tools_group)
+
+        # Imageboard Accounts & Defaults
+        print(f"DEBUG: Creating imageboard accounts section")
+        boards_group = QGroupBox("Imageboard Accounts & Defaults")
+        boards_form = QFormLayout()
+
+        # Derpibooru
+        self.derpi_api_key_edit = QLineEdit()
+        self.derpi_api_key_edit.setPlaceholderText("Optional API key")
+        self.derpi_api_key_edit.setText(self.settings.value("derpibooru_api_key", ""))
+        derpi_row = QWidget()
+        derpi_row_layout = QHBoxLayout(derpi_row)
+        derpi_row_layout.setContentsMargins(0,0,0,0)
+        derpi_row_layout.addWidget(self.derpi_api_key_edit)
+        derpi_test_btn = QPushButton("Test API Key")
+        derpi_test_btn.clicked.connect(self.test_derpi_key)
+        derpi_row_layout.addWidget(derpi_test_btn)
+        boards_form.addRow("Derpibooru API Key:", derpi_row)
+
+        self.derpi_rating_combo = QComboBox()
+        self.derpi_rating_combo.addItems(["safe", "questionable", "explicit", "all"])
+        self.derpi_rating_combo.setCurrentText(self.settings.value("derpibooru_default_rating", "safe"))
+        boards_form.addRow("Derpibooru Default Rating:", self.derpi_rating_combo)
+
+        self.derpi_max_images_spin = QSpinBox()
+        self.derpi_max_images_spin.setRange(1, 50)
+        self.derpi_max_images_spin.setValue(int(self.settings.value("derpibooru_max_images", 10)))
+        self.derpi_max_images_spin.setToolTip("Derpibooru API returns up to 50 images per request. Project tool settings can override per-call.")
+        boards_form.addRow("Derpibooru Max Images:", self.derpi_max_images_spin)
+        derpi_desc = QLabel("<i>Up to 50 per API request. Project tool settings (Tools tab) can override this default per-call.</i>")
+        derpi_desc.setWordWrap(True)
+        boards_form.addRow("", derpi_desc)
+
+        # Tantabus
+        self.tanta_api_key_edit = QLineEdit()
+        self.tanta_api_key_edit.setPlaceholderText("Optional API key")
+        self.tanta_api_key_edit.setText(self.settings.value("tantabus_api_key", ""))
+        tanta_row = QWidget()
+        tanta_row_layout = QHBoxLayout(tanta_row)
+        tanta_row_layout.setContentsMargins(0,0,0,0)
+        tanta_row_layout.addWidget(self.tanta_api_key_edit)
+        tanta_test_btn = QPushButton("Test API Key")
+        tanta_test_btn.clicked.connect(self.test_tanta_key)
+        tanta_row_layout.addWidget(tanta_test_btn)
+        boards_form.addRow("Tantabus API Key:", tanta_row)
+
+        self.tanta_rating_combo = QComboBox()
+        self.tanta_rating_combo.addItems(["safe", "questionable", "explicit", "all"])
+        self.tanta_rating_combo.setCurrentText(self.settings.value("tantabus_default_rating", "safe"))
+        boards_form.addRow("Tantabus Default Rating:", self.tanta_rating_combo)
+
+        self.tanta_max_images_spin = QSpinBox()
+        self.tanta_max_images_spin.setRange(1, 50)
+        self.tanta_max_images_spin.setValue(int(self.settings.value("tantabus_max_images", 10)))
+        self.tanta_max_images_spin.setToolTip("Tantabus API returns up to 50 images per request. Project tool settings can override per-call.")
+        boards_form.addRow("Tantabus Max Images:", self.tanta_max_images_spin)
+        tanta_desc = QLabel("<i>Up to 50 per API request. Project tool settings (Tools tab) can override this default per-call.</i>")
+        tanta_desc.setWordWrap(True)
+        boards_form.addRow("", tanta_desc)
+
+        # E621
+        e621_user_row = QWidget()
+        e621_user_layout = QHBoxLayout(e621_user_row)
+        e621_user_layout.setContentsMargins(0,0,0,0)
+        self.e621_username_edit = QLineEdit()
+        self.e621_username_edit.setPlaceholderText("Username")
+        self.e621_username_edit.setText(self.settings.value("e621_username", ""))
+        e621_user_layout.addWidget(self.e621_username_edit)
+        boards_form.addRow("E621 Username:", e621_user_row)
+
+        e621_key_row = QWidget()
+        e621_key_layout = QHBoxLayout(e621_key_row)
+        e621_key_layout.setContentsMargins(0,0,0,0)
+        self.e621_api_key_edit = QLineEdit()
+        self.e621_api_key_edit.setPlaceholderText("API key")
+        self.e621_api_key_edit.setText(self.settings.value("e621_api_key", ""))
+        e621_key_layout.addWidget(self.e621_api_key_edit)
+        e621_test_btn = QPushButton("Test Credentials")
+        e621_test_btn.clicked.connect(self.test_e621_key)
+        e621_key_layout.addWidget(e621_test_btn)
+        boards_form.addRow("E621 API Key:", e621_key_row)
+
+        self.e621_rating_combo = QComboBox()
+        self.e621_rating_combo.addItems(["safe", "questionable", "explicit", "all"])
+        self.e621_rating_combo.setCurrentText(self.settings.value("e621_default_rating", "safe"))
+        boards_form.addRow("E621 Default Rating:", self.e621_rating_combo)
+
+        self.e621_max_images_spin = QSpinBox()
+        self.e621_max_images_spin.setRange(1, 320)
+        self.e621_max_images_spin.setValue(int(self.settings.value("e621_max_images", 10)))
+        self.e621_max_images_spin.setToolTip("E621 API returns up to 320 posts per request. Project tool settings can override per-call.")
+        boards_form.addRow("E621 Max Images:", self.e621_max_images_spin)
+        e621_desc = QLabel("<i>Up to 320 per API request. Project tool settings (Tools tab) can override this default per-call.</i>")
+        e621_desc.setWordWrap(True)
+        boards_form.addRow("", e621_desc)
+
+        boards_group.setLayout(boards_form)
+        scroll_layout.addWidget(boards_group)
+        scroll_layout.addStretch()
+        
+        scroll_area.setWidget(scroll_widget)
+        layout.addWidget(scroll_area)
         
         return tab
 
@@ -512,23 +617,15 @@ class SettingsDialog(QDialog):
         ComfyUI URL is always visible.
         """
         ollama_label = self.form_layout.labelForField(self.ollama_url)
-        lm_label = self.form_layout.labelForField(self.lm_studio_url)
         lm_native_label = self.form_layout.labelForField(self.lm_studio_native_url)
 
         is_ollama = (provider_name == "Ollama")
-        # Keep legacy name handling for backwards compatibility
-        is_lm = (provider_name == "LM Studio")
-        is_lm_native = (provider_name == "LM Studio (Native SDK)") or is_lm
+        is_lm_native = (provider_name == "LM Studio (Native SDK)")
 
         # Toggle visibility for Ollama URL
         self.ollama_url.setVisible(is_ollama)
         if ollama_label:
             ollama_label.setVisible(is_ollama)
-
-        # Toggle visibility for LM Studio URL
-        self.lm_studio_url.setVisible(is_lm)
-        if lm_label:
-            lm_label.setVisible(is_lm)
         
         # Toggle visibility for LM Studio Native SDK URL
         self.lm_studio_native_url.setVisible(is_lm_native)
@@ -671,7 +768,6 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         self.settings.setValue("llm_provider", self.provider_combo.currentText())
         self.settings.setValue("ollama_url", self.ollama_url.text())
-        self.settings.setValue("lm_studio_url", self.lm_studio_url.text())
         self.settings.setValue("lm_studio_native_url", self.lm_studio_native_url.text())
         self.settings.setValue("comfy_url", self.comfy_url.text())
         
@@ -697,6 +793,21 @@ class SettingsDialog(QDialog):
         if not assets_value:
             assets_value = "assets"
         self.settings.setValue("assets_folder", assets_value)
+
+        # Save imageboard accounts & defaults
+        try:
+            self.settings.setValue("derpibooru_api_key", self.derpi_api_key_edit.text().strip())
+            self.settings.setValue("derpibooru_default_rating", self.derpi_rating_combo.currentText())
+            self.settings.setValue("derpibooru_max_images", int(self.derpi_max_images_spin.value()))
+            self.settings.setValue("tantabus_api_key", self.tanta_api_key_edit.text().strip())
+            self.settings.setValue("tantabus_default_rating", self.tanta_rating_combo.currentText())
+            self.settings.setValue("tantabus_max_images", int(self.tanta_max_images_spin.value()))
+            self.settings.setValue("e621_username", self.e621_username_edit.text().strip())
+            self.settings.setValue("e621_api_key", self.e621_api_key_edit.text().strip())
+            self.settings.setValue("e621_default_rating", self.e621_rating_combo.currentText())
+            self.settings.setValue("e621_max_images", int(self.e621_max_images_spin.value()))
+        except Exception:
+            pass
 
         # Persist project-specific configuration if a project is open
         if self.proj and self.proj.get_root_path():
@@ -746,3 +857,48 @@ class SettingsDialog(QDialog):
             self.proj.save_tool_config()
         
         self.accept()
+
+    def test_derpi_key(self):
+        import requests
+        key = self.derpi_api_key_edit.text().strip()
+        params = {"q": "safe", "per_page": 1}
+        if key:
+            params["key"] = key
+        try:
+            r = requests.get("https://derpibooru.org/api/v1.2/search/images", params=params, timeout=10)
+            if r.status_code == 200 and r.json().get("images") is not None:
+                QMessageBox.information(self, "Derpibooru", "API key appears valid.")
+            else:
+                QMessageBox.warning(self, "Derpibooru", f"Request failed (status {r.status_code}).")
+        except Exception as e:
+            QMessageBox.warning(self, "Derpibooru", f"Error: {e}")
+
+    def test_tanta_key(self):
+        import requests
+        key = self.tanta_api_key_edit.text().strip()
+        params = {"q": "safe", "per_page": 1}
+        if key:
+            params["key"] = key
+        try:
+            r = requests.get("https://tantabus.ai/api/v1/json/search/images", params=params, timeout=10)
+            if r.status_code == 200 and r.json().get("images") is not None:
+                QMessageBox.information(self, "Tantabus", "API key appears valid.")
+            else:
+                QMessageBox.warning(self, "Tantabus", f"Request failed (status {r.status_code}).")
+        except Exception as e:
+            QMessageBox.warning(self, "Tantabus", f"Error: {e}")
+
+    def test_e621_key(self):
+        import requests
+        user = self.e621_username_edit.text().strip()
+        key = self.e621_api_key_edit.text().strip()
+        headers = {"User-Agent": "InkwellAI/1.0 (settings test)"}
+        auth = (user, key) if user and key else None
+        try:
+            r = requests.get("https://e621.net/posts.json", params={"tags": "rating:s", "limit": 1}, headers=headers, auth=auth, timeout=10)
+            if r.status_code == 200 and r.json().get("posts") is not None:
+                QMessageBox.information(self, "E621", "Credentials appear valid.")
+            else:
+                QMessageBox.warning(self, "E621", f"Request failed (status {r.status_code}).")
+        except Exception as e:
+            QMessageBox.warning(self, "E621", f"Error: {e}")

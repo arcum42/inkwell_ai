@@ -84,6 +84,26 @@ class Tool(ABC):
         """
         return f":::TOOL:{self.name}:query...:::"
 
+    def has_dialog(self) -> bool:
+        """Return whether this tool has a UI dialog for direct invocation.
+        
+        Override to return True if the tool should appear in the Tools menu.
+        Default: False
+        """
+        return False
+    
+    def show_dialog(self, parent=None) -> Optional[Tuple[str, Optional[Any]]]:
+        """Show a UI dialog for this tool and return (query, extra_data) or None if cancelled.
+        
+        Args:
+            parent: Parent widget for the dialog
+            
+        Returns:
+            Tuple of (query_string, None) if user confirms, or None if cancelled.
+            The query string will be passed to execute().
+        """
+        return None
+
     def get_preferred_schema_id(self) -> Optional[str]:
         """Return a preferred structured schema id for this tool, if any.
 
@@ -164,20 +184,50 @@ class ToolRegistry:
             return ""
         
         lines = [
-            "## Available Tools",
-            "You have access to external tools. When the user asks you to search, find information, or retrieve images, use these tools:",
+            "## Available Tools - YOU MUST USE THESE FOR SEARCHES AND IMAGE REQUESTS",
+            "You have access to external tools. When the user asks you to search, find information, or retrieve images, you MUST use these tools:",
             ""
         ]
         for i, tool in enumerate(tools, 1):
             lines.append(f"{i}. {tool.description}")
             lines.append(f"   Usage: {tool.get_usage_pattern()}")
         lines.append("")
-        lines.append("IMPORTANT: To use a tool, output ONLY the tool command on its own line. Do not wrap it in code blocks or add extra text on the same line. Stop generating immediately after the tool command.")
+        lines.append("CRITICAL: When a user requests a search or image lookup:")
+        lines.append("1. Identify WHICH SERVICE they want")
+        lines.append("2. Use ONLY the matching tool for that service")
+        lines.append("3. DO NOT try to provide the information yourself")
+        lines.append("4. DO NOT return JSON or structured data")
+        lines.append("5. IMMEDIATELY output ONLY the tool command on its own line")
+        lines.append("6. Use format: :::TOOL:SERVICENAME:query:::") 
+        lines.append("7. Do not wrap in code blocks, markdown, or add any other text")
+        lines.append("")
+        lines.append("SERVICE SELECTION GUIDE (EXPLICIT REQUESTS ONLY):")
+        lines.append("Only use these tools when user EXPLICITLY asks to SEARCH, FIND, or SHOW images/information:")
+        lines.append("")
+        lines.append("EXPLICIT IMAGE SEARCH REQUESTS:")
+        lines.append("- User says 'Find pony images', 'Search for pony pictures', 'Show me pony' → Use DERPIBOORU")
+        lines.append("- User says 'Find AI pony', 'Show AI generated pony' → Use TANTABUS")  
+        lines.append("- User says 'Find furry', 'Search e621' → Use E621")
+        lines.append("- User says 'Find images', 'Show pictures' (general) → Use IMAGE")
+        lines.append("")
+        lines.append("EXPLICIT INFORMATION REQUESTS:")
+        lines.append("- User says 'Search the web for...', 'Look up...', 'Find information about...' → Use SEARCH")
+        lines.append("- User says 'What is...', 'Tell me about...' (wiki) → Use WIKI")
+        lines.append("- User says 'Read this website', 'Get content from...' → Use WEB_READ")
+        lines.append("- User says 'Generate an image' → Use GENERATE_IMAGE")
+        lines.append("")
+        lines.append("IMPORTANT - DO NOT USE TOOLS FOR:")
+        lines.append("- Casual mentions or discussions about ponies/topics (not a search request)")
+        lines.append("- Formatting questions or document editing (not an image search)")
+        lines.append("- Context or reference material the user is providing (they're informing, not requesting)")
         lines.append("")
         lines.append("Examples:")
-        lines.append("- User: 'Find an image of a cat' → You: :::TOOL:IMAGE:cat:::")
-        lines.append("- User: 'Search for python tutorials' → You: :::TOOL:SEARCH:python tutorials:::")
-        lines.append("- User: 'What is quantum computing' → You: :::TOOL:WIKI:quantum computing:::")
+        lines.append("- User: 'Find pony images for reference' → Use DERPIBOORU")
+        lines.append("- User: 'Show me AI pony pictures' → Use TANTABUS")
+        lines.append("- User: 'Edit this file about ponies' → DO NOT use tools (editing request, not image search)")
+        lines.append("- User: 'My story involves ponies' → DO NOT use tools (contextual info, not a search)")
+        lines.append("- User: 'Search the web for pony anatomy' → Use SEARCH (web info, not images)")
+        lines.append("- User: 'Look up what Derpibooru is' → Use WIKI")
         return "\n".join(lines)
 
     def get_preferred_schema_id(self, enabled_names: Optional[set] = None) -> Optional[str]:

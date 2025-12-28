@@ -33,6 +33,27 @@ class EditorController:
         self.file_ops_history.append({"type": "rename", "old": old_path, "new": new_path})
         self.file_ops_redo.clear()  # Clear redo stack on new action
         
+        # Update RAG index for renamed files
+        try:
+            if self.window.rag_engine and new_path.endswith((".md", ".txt")):
+                # Remove old chunks
+                self.window.rag_engine.remove_file(old_path)
+                # Index with new path
+                try:
+                    with open(new_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    self.window.rag_engine.index_file(new_path, content)
+                    # Update sidebar status
+                    if hasattr(self.window, 'sidebar'):
+                        self.window.sidebar.update_file_status("Project")
+                        # Also update Assets if it's a section
+                        if "Assets" in self.window.sidebar.project_sections:
+                            self.window.sidebar.update_file_status("Assets")
+                except Exception as e:
+                    print(f"DEBUG: Failed to reindex renamed file {new_path}: {e}")
+        except Exception as e:
+            print(f"DEBUG: RAG update on rename failed: {e}")
+        
         # Update project state
         self.window.save_project_state()
         
@@ -50,6 +71,43 @@ class EditorController:
         # Record for undo
         self.file_ops_history.append({"type": "move", "old": old_path, "new": new_path})
         self.file_ops_redo.clear()
+        
+        # Update RAG index for moved files/folders
+        try:
+            if self.window.rag_engine:
+                # Handle both single file and folder moves
+                if os.path.isfile(new_path) and new_path.endswith((".md", ".txt")):
+                    # Single file move
+                    self.window.rag_engine.remove_file(old_path)
+                    try:
+                        with open(new_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        self.window.rag_engine.index_file(new_path, content)
+                    except Exception as e:
+                        print(f"DEBUG: Failed to reindex moved file {new_path}: {e}")
+                elif os.path.isdir(new_path):
+                    # Folder move - reindex all md/txt files inside
+                    for root, dirs, files in os.walk(new_path):
+                        for file in files:
+                            if file.endswith((".md", ".txt")):
+                                file_new_path = os.path.join(root, file)
+                                # Compute old path
+                                rel_path = os.path.relpath(file_new_path, new_path)
+                                file_old_path = os.path.join(old_path, rel_path)
+                                self.window.rag_engine.remove_file(file_old_path)
+                                try:
+                                    with open(file_new_path, 'r', encoding='utf-8') as f:
+                                        content = f.read()
+                                    self.window.rag_engine.index_file(file_new_path, content)
+                                except Exception as e:
+                                    print(f"DEBUG: Failed to reindex {file_new_path}: {e}")
+                # Update sidebar status
+                if hasattr(self.window, 'sidebar'):
+                    self.window.sidebar.update_file_status("Project")
+                    if "Assets" in self.window.sidebar.project_sections:
+                        self.window.sidebar.update_file_status("Assets")
+        except Exception as e:
+            print(f"DEBUG: RAG update on move failed: {e}")
         
         # Update project state
         self.window.save_project_state()
@@ -144,6 +202,16 @@ class EditorController:
                 f.write(content)
             self.window.editor.mark_current_saved()
             self.window.statusBar().showMessage(f"Saved: {os.path.basename(path)}", 3000)
+            # Trigger RAG reindex for saved markdown/text files
+            try:
+                if self.window.rag_engine and path.endswith((".md", ".txt")):
+                    self.window.rag_engine.index_file(path, content)
+                    # Update sidebar status indicators
+                    if hasattr(self.window, 'sidebar'):
+                        self.window.sidebar.update_file_status("Project")
+            except Exception as e:
+                # Non-fatal; log and continue
+                print(f"DEBUG: RAG reindex on save failed for {path}: {e}")
         except Exception as e:
             QMessageBox.critical(self.window, "Error", f"Could not save file: {e}")
             

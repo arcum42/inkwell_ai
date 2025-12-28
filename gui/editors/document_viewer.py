@@ -122,7 +122,19 @@ class DocumentWidget(QWidget):
         
         # Render Markdown
         text = self.editor.toPlainText()
-        html_content = markdown.markdown(text, extensions=['fenced_code', 'tables'])
+        
+        # Preprocess: ensure blank line before lists for proper markdown parsing
+        lines = text.split('\n')
+        processed_lines = []
+        for i, line in enumerate(lines):
+            if i > 0 and line.strip().startswith('-') and not lines[i-1].strip() == '':
+                # If this line starts a list and previous line wasn't blank, add blank line
+                if not lines[i-1].strip().startswith('-'):
+                    processed_lines.append('')
+            processed_lines.append(line)
+        text = '\n'.join(processed_lines)
+        
+        html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
         
         # Add Styling
         style = """
@@ -133,6 +145,9 @@ class DocumentWidget(QWidget):
                 background: #111;
             }
             p, li, ul, ol, table, td, th, blockquote { color: #ffffff !important; }
+            ul, ol { margin: 10px 0; padding-left: 30px; }
+            ul { list-style-type: disc; }
+            li { margin: 5px 0; }
             a { color: #7cc7ff; }
             code {
                 background-color: #1f1f24;

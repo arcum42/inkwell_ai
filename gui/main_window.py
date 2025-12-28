@@ -4,11 +4,12 @@ from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication, QSettings
 
 from gui.sidebar import Sidebar
 from core.project import ProjectManager
-from core.llm_provider import OllamaProvider, LMStudioProvider, LMStudioNativeProvider
+from core.llm_provider import OllamaProvider, LMStudioNativeProvider
 from core.rag_engine import RAGEngine
 from gui.spell_checker import InkwellSpellChecker
 
 from gui.dialogs.settings_dialog import SettingsDialog
+from gui.dialogs.model_manager_dialog import ModelManagerDialog
 from gui.dialogs.diff_dialog import DiffDialog
 from gui.dialogs.image_dialog import ImageSelectionDialog
 from gui.editor import EditorWidget, DocumentWidget, ImageViewerWidget
@@ -90,6 +91,12 @@ class MainWindow(QMainWindow):
         # Editor Area
         self.editor = EditorWidget(spell_checker=self.spell_checker)
         self.editor.tab_closed.connect(self.save_project_state)
+        # Refresh context files when tabs change/open/close
+        try:
+            self.editor.tabs.currentChanged.connect(self.chat_controller.on_tabs_changed)
+            self.editor.tab_closed.connect(self.chat_controller.on_tabs_changed)
+        except Exception:
+            pass
         self.content_splitter.addWidget(self.editor)
         
         # Image Studio
@@ -102,6 +109,8 @@ class MainWindow(QMainWindow):
         self.chat.refresh_models_requested.connect(self.on_refresh_models)
         self.chat.message_copied.connect(self.on_message_copied)
         self.chat.persona_changed.connect(self.on_persona_changed)
+        self.chat.context_file_add_requested.connect(self.on_context_file_add)
+        self.chat.context_file_remove_requested.connect(self.on_context_file_remove)
         self.content_splitter.addWidget(self.chat)
 
         # Initialize controllers (after widgets are created)
@@ -131,6 +140,12 @@ class MainWindow(QMainWindow):
         self.chat.new_chat_requested.connect(self.chat_controller.handle_new_chat)
         self.chat.context_level_changed.connect(self.chat_controller.on_context_level_changed)
         self.chat.mode_changed.connect(self.chat_controller.on_mode_changed)
+        self.chat.tools_enabled_changed.connect(self.chat_controller.on_tools_enabled_changed)
+        # Update context files as the user types in chat
+        try:
+            self.chat.input_field.textChanged.connect(self.chat_controller.on_chat_input_changed)
+        except Exception:
+            pass
 
         # Initialize model controls
         self.update_model_controls()
@@ -206,7 +221,7 @@ class MainWindow(QMainWindow):
         """Update model controls with current settings and available models."""
         try:
             provider_name = self.settings.value("llm_provider", "Ollama")
-            if provider_name == "LM Studio":
+            if provider_name in ("LM Studio", "LM Studio (API)"):
                 provider_name = "LM Studio (Native SDK)"
                 self.settings.setValue("llm_provider", provider_name)
             provider = self.get_llm_provider()
@@ -276,6 +291,26 @@ class MainWindow(QMainWindow):
         if self.project_manager.get_root_path():
             self.project_manager.select_active_persona(persona_name)
             self.project_manager.save_tool_config()
+
+    def on_context_file_add(self):
+        root = self.project_manager.get_root_path()
+        if not root:
+            QMessageBox.information(self, "No Project", "Open a project to add context files.")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Select context file", root, "Text Files (*.md *.txt);;All Files (*)")
+        if not path:
+            return
+        try:
+            if os.path.commonpath([path, root]) != root:
+                QMessageBox.warning(self, "Outside Project", "Please select a file inside the project.")
+                return
+        except ValueError:
+            QMessageBox.warning(self, "Outside Project", "Please select a file inside the project.")
+            return
+        self.chat_controller.add_context_file(path)
+
+    def on_context_file_remove(self, path: str):
+        self.chat_controller.remove_context_file(path)
     
     def on_context_level_changed(self, level):
         """Handle context level change."""
@@ -283,8 +318,8 @@ class MainWindow(QMainWindow):
 
     def get_llm_provider(self):
         provider_name = self.settings.value("llm_provider", "Ollama")
-        if provider_name == "LM Studio":
-            # Deprecated selection maps to native SDK
+        if provider_name in ("LM Studio", "LM Studio (API)"):
+            # Legacy selections map to Native SDK
             provider_name = "LM Studio (Native SDK)"
             self.settings.setValue("llm_provider", provider_name)
         if provider_name == "Ollama":
@@ -293,9 +328,10 @@ class MainWindow(QMainWindow):
         elif provider_name == "LM Studio (Native SDK)":
             url = self.settings.value("lm_studio_native_url", "localhost:1234")
             return LMStudioNativeProvider(base_url=url)
-        else:  # "LM Studio" (OpenAI-compatible)
-            url = self.settings.value("lm_studio_url", "http://localhost:1234")
-            return LMStudioProvider(base_url=url)
+        else:
+            # Default fallback
+            url = self.settings.value("ollama_url", "http://localhost:11434")
+            return OllamaProvider(base_url=url)
 
     def is_response_complete(self, response: str) -> bool:
         """Check if the response appears complete.
@@ -816,6 +852,10 @@ class MainWindow(QMainWindow):
                 active_name, _ = self.project_manager.get_active_persona()
                 self.chat.update_personas(personas, active_name)
 
+    def open_model_manager(self):
+        dialog = ModelManagerDialog(self.settings, self)
+        dialog.exec()
+
     def open_image_studio(self):
         # Check if already open
         index = self.editor.tabs.indexOf(self.image_gen)
@@ -823,6 +863,27 @@ class MainWindow(QMainWindow):
             self.editor.tabs.setCurrentIndex(index)
         else:
             self.editor.add_tab(self.image_gen, "Image Studio")
+
+    def on_tool_dialog_triggered(self, tool):
+        """Handle Tools menu action - show tool dialog and execute."""
+        try:
+            # Show the tool's dialog
+            result = tool.show_dialog(self)
+            if not result:
+                # User cancelled
+                return
+                
+            query, extra_settings = result
+            if not query:
+                QMessageBox.warning(self, "Empty Query", f"Please enter a search query for {tool.name}")
+                return
+            
+            # Execute the tool
+            self.chat_controller.execute_tool_from_menu(tool, query, extra_settings)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Tool Error", f"Error executing {tool.name}: {str(e)}")
+            print(f"Error in on_tool_dialog_triggered: {e}")
 
     def on_file_double_clicked(self, file_path):
         """Handle file double-click in sidebar.
