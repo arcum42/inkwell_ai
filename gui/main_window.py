@@ -49,7 +49,8 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         
         # Core state
-        self.project_manager = ProjectManager()
+        assets_folder = "assets"  # Default assets folder location
+        self.project_manager = ProjectManager(assets_folder=assets_folder)
         self.settings = QSettings("InkwellAI", "InkwellAI")
         self.rag_engine = None
         self._last_token_usage = None
@@ -289,7 +290,11 @@ class MainWindow(QMainWindow):
     def on_persona_changed(self, persona_name):
         """Handle persona selection change."""
         if self.project_manager.get_root_path():
-            self.project_manager.select_active_persona(persona_name)
+            # Special case: "(None - use model default)" means no system prompt
+            if persona_name == "(None - use model default)":
+                self.project_manager.select_active_persona("")
+            else:
+                self.project_manager.select_active_persona(persona_name)
             self.project_manager.save_tool_config()
 
     def on_context_file_add(self):
@@ -374,6 +379,7 @@ class MainWindow(QMainWindow):
         """Automatically continue the previous response."""
         provider = self.get_llm_provider()
         model = self.settings.value("ollama_model", "llama3")
+        # Get system prompt from active persona/system prompt file, or use default
         system_prompt = self.project_manager.get_system_prompt(
             self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant. Help users with their fiction, characters, worldbuilding, and storytelling.")
         )
@@ -971,6 +977,7 @@ class MainWindow(QMainWindow):
         self.chat_history.append({"role": "user", "content": f"Tool Output: {result}"})
         
         self.chat.show_thinking()
+        # Get system prompt from active persona/system prompt file, or use default
         system_prompt = self.project_manager.get_system_prompt(
             self.settings.value("system_prompt", "You are Inkwell AI, a creative writing assistant. Help users with their fiction, characters, worldbuilding, and storytelling.")
         )
@@ -1150,7 +1157,7 @@ class MainWindow(QMainWindow):
             context = self.rag_engine.query(query)
             print(f"DEBUG: Retrieved {len(context) if context else 0} chunks")
         
-        # Build system prompt
+        # Build system prompt from active persona/system prompt file, or use default
         system_prompt = self.project_manager.get_system_prompt(
             self.settings.value("system_prompt", "You are a helpful AI assistant.")
         )

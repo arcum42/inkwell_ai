@@ -1,11 +1,13 @@
 import os
 import base64
 import json
+from core.system_prompts import SystemPromptsManager
 
 class ProjectManager:
-    def __init__(self):
+    def __init__(self, assets_folder: str = "assets"):
         self.root_path = None
         self.tool_config = {}
+        self.system_prompts_manager = SystemPromptsManager(assets_folder)
 
     def open_project(self, path):
         """Sets the root path for the project."""
@@ -32,23 +34,48 @@ class ProjectManager:
             print(f"WARN: Failed to load tool config {config_path}: {e}")
 
     def get_active_persona(self):
-        """Return (name, prompt) for the active persona if configured."""
+        """Return (name, prompt) for the active persona if configured.
+        
+        First checks system prompts in assets/SystemPrompts, then falls back to
+        project-stored personas for backward compatibility.
+        """
         if not isinstance(self.tool_config, dict):
             return None, None
-        personas = self.tool_config.get('personas', {})
+        
         active_name = self.tool_config.get('active_persona')
+        
+        # Check system prompts first
+        if active_name:
+            prompt = self.system_prompts_manager.get_prompt(active_name)
+            if prompt:
+                return active_name, prompt
+        
+        # Fall back to project-stored personas (backward compatibility)
+        personas = self.tool_config.get('personas', {})
         if isinstance(personas, dict) and active_name in personas:
             prompt = personas.get(active_name)
             if isinstance(prompt, str) and prompt.strip():
                 return active_name, prompt
+        
         return None, None
 
     def get_all_personas(self):
-        """Return dict of all personas {name: prompt}."""
-        if not isinstance(self.tool_config, dict):
-            return {}
-        personas = self.tool_config.get('personas', {})
-        return personas if isinstance(personas, dict) else {}
+        """Return dict of all personas {name: prompt}.
+        
+        Includes both system prompts from assets/SystemPrompts and project-stored personas.
+        """
+        all_personas = {}
+        
+        # Load system prompts first
+        all_personas.update(self.system_prompts_manager.get_all_prompts())
+        
+        # Add project-stored personas (may override system prompts with same name)
+        if isinstance(self.tool_config, dict):
+            personas = self.tool_config.get('personas', {})
+            if isinstance(personas, dict):
+                all_personas.update(personas)
+        
+        return all_personas
 
     def add_persona(self, name: str, prompt: str):
         """Add a new persona with the given name and prompt."""
@@ -107,17 +134,36 @@ class ProjectManager:
         return True
 
     def select_active_persona(self, name: str):
-        """Set the active persona by name."""
+        """Set the active persona by name.
+        
+        The persona can be either a system prompt from assets/SystemPrompts
+        or a project-stored persona.
+        """
         if not isinstance(name, str):
             return False
-        personas = self.tool_config.get('personas', {})
-        if not isinstance(personas, dict) or (name and name not in personas):
+        
+        # Check if it's a valid persona (either system or project-stored)
+        all_personas = self.get_all_personas()
+        if name and name not in all_personas:
             return False
-        self.tool_config['active_persona'] = name if name else None
+        
+        # Store empty string to indicate "use no system prompt" option
+        self.tool_config['active_persona'] = name
         return True
 
     def get_system_prompt(self, default_prompt: str) -> str:
-        """Return project-specific system prompt, falling back to provided default."""
+        """Return project-specific system prompt, falling back to provided default.
+        
+        Returns empty string if active_persona is explicitly cleared (for "None" option),
+        otherwise returns the active persona's prompt or the default.
+        """
+        active_name = self.tool_config.get('active_persona')
+        
+        # If active_persona is explicitly set to empty string, use no system prompt
+        if active_name == "":
+            return ""
+        
+        # Otherwise, get the active persona's prompt
         _, prompt = self.get_active_persona()
         if prompt:
             return prompt

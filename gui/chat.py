@@ -559,19 +559,22 @@ class ChatWidget(QWidget):
         self.persona_combo.blockSignals(True)
         self.persona_combo.clear()
         
-        if not personas:
-            self.persona_combo.addItem("(No personas)")
-            self.persona_combo.setEnabled(False)
-        else:
+        # Add "None" option at the top to disable system prompt
+        self.persona_combo.addItem("(None - use model default)")
+        
+        if personas:
             sorted_names = sorted(personas.keys())
             for name in sorted_names:
                 self.persona_combo.addItem(name)
-            
-            # Set the active persona
-            if active_name and active_name in personas:
-                self.persona_combo.setCurrentText(active_name)
-            
-            self.persona_combo.setEnabled(True)
+        
+        # Set the active persona if available
+        if active_name and active_name in (personas or {}):
+            self.persona_combo.setCurrentText(active_name)
+        else:
+            # Default to "None" if no active persona
+            self.persona_combo.setCurrentIndex(0)
+        
+        self.persona_combo.setEnabled(True)
         
         self.persona_combo.blockSignals(False)
 
